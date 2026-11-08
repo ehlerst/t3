@@ -3,9 +3,8 @@ name: Comparative S3 Client Benchmark (t3 vs s5cmd vs aws-cli)
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'crates/**'
-      - '.github/workflows/compare-alternatives.yml'
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -41,30 +40,112 @@ jobs:
 
       - name: Run Comparative S3 Transfer Benchmark against RustStack
         run: |
-          ./target/release/t3 --endpoint-url http://localhost:4566 mb s3://compare-bucket
-          mkdir -p /tmp/bench-data /tmp/out-t3 /tmp/out-s5cmd /tmp/out-aws
-          for i in $(seq 1 500); do
-            head -c 4096 /dev/zero > /tmp/bench-data/file_$i.bin
-          done
+          mkdir -p reports
+          python3 - << 'EOF'
+          import subprocess, time, os
 
-          T3_START=$(date +%s%3N)
-          ./target/release/t3 --endpoint-url http://localhost:4566 cp /tmp/bench-data/ s3://compare-bucket/t3/ > /dev/null
-          ./target/release/t3 --endpoint-url http://localhost:4566 cp "s3://compare-bucket/t3/*" /tmp/out-t3/ > /dev/null
-          T3_MS=$(( $(date +%s%3N) - T3_START ))
+          env = {
+              **os.environ,
+              "AWS_ACCESS_KEY_ID": "test",
+              "AWS_SECRET_ACCESS_KEY": "test",
+              "AWS_DEFAULT_REGION": "us-east-1",
+          }
+          EP = "http://localhost:4566"
+          T3 = ["./target/release/t3", "--endpoint-url", EP]
+          S5 = ["s5cmd", "--endpoint-url", EP]
+          AWS = ["aws", "--endpoint-url", EP, "s3"]
 
-          S5_START=$(date +%s%3N)
-          s5cmd --endpoint-url http://localhost:4566 cp /tmp/bench-data/ s3://compare-bucket/s5/ > /dev/null
-          s5cmd --endpoint-url http://localhost:4566 cp "s3://compare-bucket/s5/*" /tmp/out-s5cmd/ > /dev/null
-          S5_MS=$(( $(date +%s%3N) - S5_START ))
+          subprocess.run(T3 + ["mb", "s3://bench-t3"], env=env, check=True)
+          subprocess.run(T3 + ["mb", "s3://bench-s5"], env=env, check=True)
+          subprocess.run(T3 + ["mb", "s3://bench-aws"], env=env, check=True)
 
-          AWS_START=$(date +%s%3N)
-          aws --endpoint-url http://localhost:4566 s3 cp --recursive /tmp/bench-data/ s3://compare-bucket/aws/ > /dev/null
-          aws --endpoint-url http://localhost:4566 s3 cp --recursive s3://compare-bucket/aws/ /tmp/out-aws/ > /dev/null
-          AWS_MS=$(( $(date +%s%3N) - AWS_START ))
+          os.makedirs("/tmp/bench-data/small", exist_ok=True)
+          os.makedirs("/tmp/out-t3", exist_ok=True)
+          os.makedirs("/tmp/out-s5", exist_ok=True)
+          os.makedirs("/tmp/out-aws", exist_ok=True)
 
-          echo "## ⚡ S3 Client Benchmark (500 x 4 KB Upload + Download on RustStack)" >> $GITHUB_STEP_SUMMARY
-          echo "| Client | Language | Round-Trip Time (ms) |" >> $GITHUB_STEP_SUMMARY
-          echo "|:---|:---|---:|" >> $GITHUB_STEP_SUMMARY
-          echo "| **⚡ t3 (Winner)** | Rust | **${T3_MS} ms** |" >> $GITHUB_STEP_SUMMARY
-          echo "| **s5cmd v2.3.0** | Go | ${S5_MS} ms |" >> $GITHUB_STEP_SUMMARY
-          echo "| **aws-cli v2** | Python | ${AWS_MS} ms |" >> $GITHUB_STEP_SUMMARY
+          for i in range(1000):
+              with open(f"/tmp/bench-data/small/file_{i:04d}.bin", "wb") as f:
+                  f.write(b"x" * 4096)
+
+          def measure(cmd):
+              t0 = time.perf_counter()
+              p = subprocess.run(
+                  ["/usr/bin/time", "-f", "%M"] + cmd,
+                  env=env,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.PIPE,
+                  text=True,
+                  check=True,
+              )
+              dt_ms = (time.perf_counter() - t0) * 1000.0
+              lines = [l.strip() for l in p.stderr.strip().splitlines() if l.strip().isdigit()]
+              rss_mib = (int(lines[-1]) / 1024.0) if lines else 0.0
+              return dt_ms, rss_mib
+
+          workloads = [
+              (
+                  "Cold Startup (`version`)",
+                  ["./target/release/t3", "version"],
+                  ["s5cmd", "version"],
+                  ["aws", "--version"],
+              ),
+              (
+                  "Parallel Upload (1,000 × 4 KiB)",
+                  T3 + ["cp", "/tmp/bench-data/small/*", "s3://bench-t3/small/"],
+                  S5 + ["cp", "/tmp/bench-data/small/*", "s3://bench-s5/small/"],
+                  AWS + ["cp", "--recursive", "/tmp/bench-data/small/", "s3://bench-aws/small/"],
+              ),
+              (
+                  "Parallel Download (1,000 × 4 KiB)",
+                  T3 + ["cp", "s3://bench-t3/small/*", "/tmp/out-t3/"],
+                  S5 + ["cp", "s3://bench-s5/small/*", "/tmp/out-s5/"],
+                  AWS + ["cp", "--recursive", "s3://bench-aws/small/", "/tmp/out-aws/"],
+              ),
+              (
+                  "List Objects (`ls` 1,000 keys)",
+                  T3 + ["ls", "s3://bench-t3/small/*"],
+                  S5 + ["ls", "s3://bench-s5/small/*"],
+                  AWS + ["ls", "s3://bench-aws/small/"],
+              ),
+              (
+                  "Incremental Sync (`sync --size-only`)",
+                  T3 + ["sync", "--size-only", "/tmp/bench-data/small/", "s3://bench-t3/small/"],
+                  S5 + ["sync", "--size-only", "/tmp/bench-data/small/", "s3://bench-s5/small/"],
+                  AWS + ["sync", "--size-only", "/tmp/bench-data/small/", "s3://bench-aws/small/"],
+              ),
+              (
+                  "Batch Delete (`rm` 1,000 keys)",
+                  T3 + ["rm", "s3://bench-t3/small/*"],
+                  S5 + ["rm", "s3://bench-s5/small/*"],
+                  AWS + ["rm", "--recursive", "s3://bench-aws/small/"],
+              ),
+          ]
+
+          md = []
+          md.append("# ⚡ Comparative S3 Client Benchmark (`t3` vs `s5cmd` v2.3.0 vs `aws-cli` v2)\n")
+          md.append("| Workload | **⚡ `t3` (Rust)** | `s5cmd` v2.3.0 (Go) | `aws-cli` v2 (Python) | `t3` vs `s5cmd` | `t3` vs `aws-cli` |")
+          md.append("|:---|---:|---:|---:|:---|:---|")
+
+          for label, c_t3, c_s5, c_aws in workloads:
+              t3_ms, t3_rss = measure(c_t3)
+              s5_ms, s5_rss = measure(c_s5)
+              aws_ms, aws_rss = measure(c_aws)
+              vs_s5 = f"**{s5_ms / t3_ms:.2f}x faster** ({s5_rss / max(t3_rss, 0.1):.1f}x less RAM)"
+              vs_aws = f"**{aws_ms / t3_ms:.1f}x faster** ({aws_rss / max(t3_rss, 0.1):.1f}x less RAM)"
+              md.append(
+                  f"| **{label}** | **{t3_ms:.1f} ms** ({t3_rss:.1f} MiB) | {s5_ms:.1f} ms ({s5_rss:.1f} MiB) | {aws_ms:.1f} ms ({aws_rss:.1f} MiB) | {vs_s5} | {vs_aws} |"
+              )
+
+          report = "\n".join(md) + "\n"
+          print(report)
+          with open("reports/compare-s3-clients.md", "w") as f:
+              f.write(report)
+          EOF
+          cat reports/compare-s3-clients.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Comparative Benchmark Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-s3-clients-report
+          path: reports/compare-s3-clients.md
