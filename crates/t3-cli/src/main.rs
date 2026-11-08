@@ -77,7 +77,7 @@ pub struct Cli {
     #[arg(long = "log", default_value = "info", global = true)]
     pub log: String,
 
-    /// Generate shell completion script (bash, zsh, fish, pwsh)
+    /// Generate shell completion script (bash, zsh, fish)
     #[arg(long = "install-completion", global = true)]
     pub install_completion: Option<String>,
 

@@ -939,7 +939,7 @@ impl T3Engine {
 
         let mut set = JoinSet::new();
         for entry in entries {
-            let full_norm = entry.abs_path.to_string_lossy().replace('\\', "/");
+            let full_norm = entry.abs_path.to_string_lossy();
             if !filter.matches(&full_norm, &entry.rel_path) {
                 continue;
             }
@@ -1705,7 +1705,7 @@ impl T3Engine {
                     return Ok(map);
                 }
                 for entry in walk_local_files(path, follow_symlinks)? {
-                    let full_norm = entry.abs_path.to_string_lossy().replace('\\', "/");
+                    let full_norm = entry.abs_path.to_string_lossy();
                     if filter.matches(&full_norm, &entry.rel_path) {
                         map.insert(
                             entry.rel_path.clone(),

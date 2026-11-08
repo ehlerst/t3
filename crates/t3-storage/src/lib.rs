@@ -1,3 +1,6 @@
+#[cfg(not(unix))]
+compile_error!("t3 only supports *nix operating systems (Linux, macOS, BSD).");
+
 pub mod buffer_pool;
 pub mod local_fs;
 

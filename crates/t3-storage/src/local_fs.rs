@@ -219,7 +219,7 @@ pub fn walk_local_files(
                 .strip_prefix(root)
                 .unwrap_or(entry.path())
                 .to_string_lossy()
-                .replace('\\', "/");
+                .into_owned();
             let modified = meta.modified().ok().map(DateTime::<Utc>::from);
             entries.push(LocalFileEntry {
                 abs_path: entry.path().to_path_buf(),
