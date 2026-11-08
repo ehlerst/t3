@@ -518,7 +518,7 @@ async fn main() -> ExitCode {
         use_list_objects_v1: cli.use_list_objects_v1,
         request_payer: cli.request_payer.clone(),
         retry_count: cli.retry_count,
-        unsigned_payload: false,
+        unsigned_payload: true,
     };
 
     let resolved = ResolvedConfig::resolve(&overrides);

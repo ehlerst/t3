@@ -13,6 +13,22 @@
 
 ---
 
+## ⚡ Head-to-Head Benchmark (`t3` vs `s5cmd` v2.3.0 on RustStack)
+
+Measured end-to-end wall-clock execution time and peak resident memory (`RSS`) across 1,000 × 4 KiB objects against [RustStack](https://github.com/ehlerst/ruststack):
+
+| Workload (1,000 × 4 KiB Objects) | **⚡ `t3` v0.1.0 (Rust)** | `s5cmd` v2.3.0 (Go) | `t3` Speedup | `t3` Memory Reduction |
+|:---|---:|---:|:---|:---|
+| **Cold Startup (`version`)** | **3.1 ms** (6.2 MiB) | 4.8 ms (13.2 MiB) | **1.55x faster** | **2.12x less RAM** |
+| **Parallel Upload (`cp 1,000 files → S3`)** | **20.6 ms** (14.3 MiB) | 91.3 ms (33.6 MiB) | **4.43x faster** | **2.35x less RAM** |
+| **Parallel Download (`cp S3 → 1,000 files`)** | **29.9 ms** (12.9 MiB) | 114.7 ms (43.3 MiB) | **3.83x faster** | **3.34x less RAM** |
+| **Object Listing (`ls 1,000 objects`)** | **7.3 ms** (8.3 MiB) | 26.5 ms (20.1 MiB) | **3.61x faster** | **2.42x less RAM** |
+| **Disk Usage Summary (`du 1,000 objects`)** | **6.5 ms** (8.4 MiB) | 28.3 ms (20.6 MiB) | **4.36x faster** | **2.44x less RAM** |
+| **Incremental Sync (`sync --size-only`)** | **8.2 ms** (7.9 MiB) | 58.6 ms (31.1 MiB) | **7.18x faster** | **3.93x less RAM** |
+| **Pipelined Batch Delete (`rm 1,000 keys`)** | **8.6 ms** (8.7 MiB) | 43.7 ms (23.5 MiB) | **5.07x faster** | **2.71x less RAM** |
+
+---
+
 ## ⚡ Why `t3` Beats `s5cmd` and `aws-cli`
 
 | Metric / Capability | **⚡ `t3` (Rust)** | `s5cmd` v2.3.0 (Go) | `aws s3` CLI v2 (Python) |

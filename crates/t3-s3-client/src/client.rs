@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use t3_telemetry::TelemetryStats;
+use tokio::sync::Semaphore;
 use url::Url;
 
 #[derive(Clone)]
@@ -23,6 +24,7 @@ pub struct S3Client {
     config: Arc<ResolvedConfig>,
     signer: Arc<SigV4Signer>,
     endpoint_idx: Arc<AtomicUsize>,
+    http_sem: Arc<Semaphore>,
     stats: Option<Arc<TelemetryStats>>,
 }
 
@@ -31,9 +33,10 @@ impl S3Client {
         config: ResolvedConfig,
         stats: Option<Arc<TelemetryStats>>,
     ) -> Result<Self, S3ClientError> {
+        let max_inflight = (config.endpoints.len().max(1) * 32).clamp(32, 128);
         let http = reqwest::Client::builder()
             .tcp_nodelay(true)
-            .pool_max_idle_per_host(512)
+            .pool_max_idle_per_host(max_inflight)
             .pool_idle_timeout(Duration::from_secs(90))
             .danger_accept_invalid_certs(config.no_verify_ssl)
             .connect_timeout(Duration::from_secs(10))
@@ -45,6 +48,7 @@ impl S3Client {
             config: Arc::new(config),
             signer: Arc::new(SigV4Signer::new()),
             endpoint_idx: Arc::new(AtomicUsize::new(0)),
+            http_sem: Arc::new(Semaphore::new(max_inflight)),
             stats,
         })
     }
@@ -164,6 +168,7 @@ impl S3Client {
                 .headers(headers)
                 .body(body.clone());
 
+            let _http_permit = self.http_sem.acquire().await.unwrap();
             match req.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();

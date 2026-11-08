@@ -16,6 +16,8 @@ authors = ["RustStack Contributors"]
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/ehlerst/t3"
 readme = "README.md"
+keywords = ["s3", "s5cmd", "aws", "cli", "sync"]
+categories = ["command-line-utilities", "filesystem", "network-programming"]
 
 [workspace.dependencies]
 # Internal crates

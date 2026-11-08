@@ -1019,7 +1019,6 @@ impl T3Engine {
                 let pnum = (part_idx + 1) as i32;
                 let permit = part_sem.clone().acquire_owned().await?;
                 let r = reader.clone();
-                let pool = self.buffer_pool.clone();
                 let c = self.s3.clone();
                 let b = bucket.to_string();
                 let k = key.to_string();
@@ -1027,10 +1026,9 @@ impl T3Engine {
 
                 part_set.spawn(async move {
                     let _p = permit;
-                    let mut slab = pool.acquire(chunk_len).await;
-                    r.read_at(offset, slab.as_mut_slice())?;
-                    let body = Bytes::copy_from_slice(slab.as_slice());
-                    drop(slab);
+                    let mut buf = vec![0u8; chunk_len];
+                    r.read_at(offset, &mut buf)?;
+                    let body = Bytes::from(buf);
                     let etag = c.upload_part(&b, &k, &uid, pnum, body).await?;
                     Ok::<CompletedPartInfo, anyhow::Error>(CompletedPartInfo {
                         part_number: pnum,
