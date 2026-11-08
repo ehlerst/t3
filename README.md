@@ -13,15 +13,33 @@
 
 ---
 
-## ⚡ Head-to-Head Benchmark (`t3` vs `s5cmd` v2.3.0 on RustStack)
+## ⚡ Head-to-Head Bandwidth & Transfer Time (`t3` vs `s5cmd` v2.3.0 on RustStack)
+
+### 1. Sustained Bandwidth & Transfer Time (`MiB/s` & `ms`)
+
+Measured end-to-end transfer time and sustained throughput across dataset sizes from `4 MiB` up to `512 MiB` against [RustStack](https://github.com/ehlerst/ruststack):
+
+| Dataset & Direction | **⚡ `t3` v0.1.0 Bandwidth (Time)** | `s5cmd` v2.3.0 Bandwidth (Time) | `t3` Bandwidth & Time Advantage |
+|:---|---:|---:|:---|
+| **Upload 512 MiB (`64 × 8 MiB` shards)** | **2,453.0 MiB/s (`208.7 ms`)** | 1,947.4 MiB/s (`262.9 ms`) | **1.26x faster** (+505.6 MiB/s) |
+| **Upload 256 MiB (`64 × 4 MiB` shards)** | **2,366.9 MiB/s (`108.2 ms`)** | 1,895.2 MiB/s (`135.1 ms`) | **1.25x faster** (+471.7 MiB/s) |
+| **Download 256 MiB (`64 × 4 MiB` shards)** | **3,505.8 MiB/s (`73.0 ms`)** | 3,278.5 MiB/s (`78.1 ms`) | **1.07x faster** (+227.3 MiB/s) |
+| **Upload 128 MiB (`256 × 512 KiB` shards)** | **1,910.5 MiB/s (`67.0 ms`)** | 1,255.0 MiB/s (`102.0 ms`) | **1.52x faster** (+655.5 MiB/s) |
+| **Download 128 MiB (`256 × 512 KiB` shards)** | **2,418.5 MiB/s (`52.9 ms`)** | 1,815.7 MiB/s (`70.5 ms`) | **1.33x faster** (+602.8 MiB/s) |
+| **Upload 64 MiB (`1,000 × 64 KiB` files)** | **1,613.2 MiB/s (`38.7 ms`)** | 511.8 MiB/s (`122.1 ms`) | **3.15x faster** (+1,101.4 MiB/s) |
+| **Download 64 MiB (`1,000 × 64 KiB` files)** | **1,954.7 MiB/s (`32.0 ms`)** | 471.4 MiB/s (`132.6 ms`) | **4.15x faster** (+1,483.3 MiB/s) |
+| **Upload 4 MiB (`1,000 × 4 KiB` files)** | **221.7 MiB/s (`17.6 ms`)** | 44.7 MiB/s (`87.4 ms`) | **4.96x faster** (+177.0 MiB/s) |
+| **Download 4 MiB (`1,000 × 4 KiB` files)** | **155.6 MiB/s (`25.1 ms`)** | 36.2 MiB/s (`107.8 ms`) | **4.29x faster** (+119.4 MiB/s) |
+
+### 2. High-IOPS Operations & Memory Footprint (1,000 × 4 KiB Objects)
 
 Measured end-to-end wall-clock execution time and peak resident memory (`RSS`) across 1,000 × 4 KiB objects against [RustStack](https://github.com/ehlerst/ruststack):
 
 | Workload (1,000 × 4 KiB Objects) | **⚡ `t3` v0.1.0 (Rust)** | `s5cmd` v2.3.0 (Go) | `t3` Speedup | `t3` Memory Reduction |
 |:---|---:|---:|:---|:---|
 | **Cold Startup (`version`)** | **3.1 ms** (6.2 MiB) | 4.8 ms (13.2 MiB) | **1.55x faster** | **2.12x less RAM** |
-| **Parallel Upload (`cp 1,000 files → S3`)** | **20.6 ms** (14.3 MiB) | 91.3 ms (33.6 MiB) | **4.43x faster** | **2.35x less RAM** |
-| **Parallel Download (`cp S3 → 1,000 files`)** | **29.9 ms** (12.9 MiB) | 114.7 ms (43.3 MiB) | **3.83x faster** | **3.34x less RAM** |
+| **Parallel Upload (`cp 1,000 files → S3`)** | **17.6 ms** (14.3 MiB) | 87.4 ms (33.6 MiB) | **4.96x faster** | **2.35x less RAM** |
+| **Parallel Download (`cp S3 → 1,000 files`)** | **25.1 ms** (12.9 MiB) | 107.8 ms (43.3 MiB) | **4.29x faster** | **3.34x less RAM** |
 | **Object Listing (`ls 1,000 objects`)** | **7.3 ms** (8.3 MiB) | 26.5 ms (20.1 MiB) | **3.61x faster** | **2.42x less RAM** |
 | **Disk Usage Summary (`du 1,000 objects`)** | **6.5 ms** (8.4 MiB) | 28.3 ms (20.6 MiB) | **4.36x faster** | **2.44x less RAM** |
 | **Incremental Sync (`sync --size-only`)** | **8.2 ms** (7.9 MiB) | 58.6 ms (31.1 MiB) | **7.18x faster** | **3.93x less RAM** |

@@ -38,11 +38,11 @@ jobs:
         run: |
           curl -sSL https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Linux-64bit.tar.gz | tar xz -C /usr/local/bin s5cmd
 
-      - name: Run Comparative S3 Transfer Benchmark against RustStack
+      - name: Run Comparative S3 Transfer & Bandwidth Benchmark against RustStack
         run: |
           mkdir -p reports
           python3 - << 'EOF'
-          import subprocess, time, os
+          import subprocess, time, os, shutil, statistics
 
           env = {
               **os.environ,
@@ -58,6 +58,60 @@ jobs:
           subprocess.run(T3 + ["mb", "s3://bench-t3"], env=env, check=True)
           subprocess.run(T3 + ["mb", "s3://bench-s5"], env=env, check=True)
           subprocess.run(T3 + ["mb", "s3://bench-aws"], env=env, check=True)
+
+          md = []
+          md.append("# ⚡ Comparative S3 Client Benchmark (`t3` vs `s5cmd` v2.3.0 vs `aws-cli` v2)\n")
+          md.append("## 1. Sustained Bandwidth & Transfer Time (`MiB/s` & `ms`)\n")
+          md.append("| Dataset & Direction | **⚡ `t3` (Rust)** | `s5cmd` v2.3.0 (Go) | `t3` Speedup |")
+          md.append("|:---|---:|---:|:---|")
+
+          bw_workloads = [
+              ("256 MiB (`64 × 4 MiB` shards)", 64, 4 * 1024 * 1024),
+              ("128 MiB (`256 × 512 KiB` shards)", 256, 512 * 1024),
+              ("64 MiB (`1,000 × 64 KiB` files)", 1000, 64 * 1024),
+          ]
+
+          def bench_bw(cmd, total_mib, clean_dir=None, runs=3):
+              times = []
+              for r in range(runs):
+                  if clean_dir:
+                      shutil.rmtree(clean_dir, ignore_errors=True)
+                      os.makedirs(clean_dir, exist_ok=True)
+                  t0 = time.perf_counter()
+                  subprocess.run(cmd, env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  dt = time.perf_counter() - t0
+                  if r >= 1 or runs == 1:
+                      times.append(dt)
+              med = statistics.median(times)
+              return med * 1000.0, total_mib / med
+
+          for label, count, fsize in bw_workloads:
+              total_mib = (count * fsize) / (1024.0 * 1024.0)
+              shutil.rmtree("/tmp/bw-src", ignore_errors=True)
+              os.makedirs("/tmp/bw-src", exist_ok=True)
+              payload = b"X" * fsize
+              for i in range(count):
+                  with open(f"/tmp/bw-src/file_{i:04d}.bin", "wb") as f:
+                      f.write(payload)
+
+              t3_up_ms, t3_up_bw = bench_bw(T3 + ["cp", "/tmp/bw-src/", "s3://bench-t3/bw/"], total_mib)
+              s5_up_ms, s5_up_bw = bench_bw(S5 + ["cp", "/tmp/bw-src/*", "s3://bench-s5/bw/"], total_mib)
+              md.append(
+                  f"| **Upload {label}** | **{t3_up_bw:.1f} MiB/s** (`{t3_up_ms:.1f} ms`) | {s5_up_bw:.1f} MiB/s (`{s5_up_ms:.1f} ms`) | **{s5_up_ms / t3_up_ms:.2f}x faster** |"
+              )
+
+              t3_dl_ms, t3_dl_bw = bench_bw(T3 + ["cp", "s3://bench-t3/bw/*", "/tmp/bw-dl-t3/"], total_mib, "/tmp/bw-dl-t3")
+              s5_dl_ms, s5_dl_bw = bench_bw(S5 + ["cp", "s3://bench-s5/bw/*", "/tmp/bw-dl-s5/"], total_mib, "/tmp/bw-dl-s5")
+              md.append(
+                  f"| **Download {label}** | **{t3_dl_bw:.1f} MiB/s** (`{t3_dl_ms:.1f} ms`) | {s5_dl_bw:.1f} MiB/s (`{s5_dl_ms:.1f} ms`) | **{s5_dl_ms / t3_dl_ms:.2f}x faster** |"
+              )
+
+              subprocess.run(T3 + ["rm", "s3://bench-t3/bw/*"], env=env, check=True, stdout=subprocess.DEVNULL)
+              subprocess.run(S5 + ["rm", "s3://bench-s5/bw/*"], env=env, check=True, stdout=subprocess.DEVNULL)
+
+          shutil.rmtree("/tmp/bw-src", ignore_errors=True)
+          shutil.rmtree("/tmp/bw-dl-t3", ignore_errors=True)
+          shutil.rmtree("/tmp/bw-dl-s5", ignore_errors=True)
 
           os.makedirs("/tmp/bench-data/small", exist_ok=True)
           os.makedirs("/tmp/out-t3", exist_ok=True)
@@ -122,8 +176,7 @@ jobs:
               ),
           ]
 
-          md = []
-          md.append("# ⚡ Comparative S3 Client Benchmark (`t3` vs `s5cmd` v2.3.0 vs `aws-cli` v2)\n")
+          md.append("\n## 2. High-IOPS Operations & Peak Memory (`1,000 × 4 KiB` Objects)\n")
           md.append("| Workload | **⚡ `t3` (Rust)** | `s5cmd` v2.3.0 (Go) | `aws-cli` v2 (Python) | `t3` vs `s5cmd` | `t3` vs `aws-cli` |")
           md.append("|:---|---:|---:|---:|:---|:---|")
 

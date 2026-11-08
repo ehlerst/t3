@@ -25,6 +25,7 @@ pub struct S3Client {
     signer: Arc<SigV4Signer>,
     endpoint_idx: Arc<AtomicUsize>,
     http_sem: Arc<Semaphore>,
+    large_sem: Arc<Semaphore>,
     stats: Option<Arc<TelemetryStats>>,
 }
 
@@ -33,7 +34,8 @@ impl S3Client {
         config: ResolvedConfig,
         stats: Option<Arc<TelemetryStats>>,
     ) -> Result<Self, S3ClientError> {
-        let max_inflight = (config.endpoints.len().max(1) * 32).clamp(32, 128);
+        let max_inflight = (config.endpoints.len().max(1) * 24).clamp(24, 128);
+        let large_inflight = (config.endpoints.len().max(1) * 6).clamp(6, 32);
         let http = reqwest::Client::builder()
             .tcp_nodelay(true)
             .pool_max_idle_per_host(max_inflight)
@@ -49,6 +51,7 @@ impl S3Client {
             signer: Arc::new(SigV4Signer::new()),
             endpoint_idx: Arc::new(AtomicUsize::new(0)),
             http_sem: Arc::new(Semaphore::new(max_inflight)),
+            large_sem: Arc::new(Semaphore::new(large_inflight)),
             stats,
         })
     }
@@ -448,6 +451,149 @@ impl S3Client {
             .await?;
 
         Ok((extract_object_head(&resp_headers), body))
+    }
+
+    pub async fn get_object_bytes(
+        &self,
+        bucket: &str,
+        key: &str,
+        range: Option<(u64, u64)>,
+        version_id: Option<&str>,
+    ) -> Result<Bytes, S3ClientError> {
+        let mut query = Vec::new();
+        if let Some(vid) = version_id {
+            query.push(("versionId", vid));
+        }
+        let mut headers = HeaderMap::new();
+        if let Some((start, end)) = range {
+            let range_val = format!("bytes={start}-{end}");
+            headers.insert("range", HeaderValue::from_str(&range_val).unwrap());
+        }
+
+        let (_, _, body) = self
+            .execute_raw(
+                Method::GET,
+                Some(bucket),
+                Some(key),
+                &query,
+                headers,
+                Bytes::new(),
+            )
+            .await?;
+
+        Ok(body)
+    }
+
+    pub async fn download_object_to_file(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        dst_file: &std::path::Path,
+        _size_hint: u64,
+    ) -> Result<u64, S3ClientError> {
+        let mut query = Vec::new();
+        if let Some(vid) = version_id {
+            query.push(("versionId", vid));
+        }
+
+        let max_retries = self.config.retry_count;
+        let mut attempt = 0u32;
+
+        loop {
+            let url = self.build_url(Some(bucket), Some(key), &query)?;
+            let mut headers = HeaderMap::new();
+
+            if let Some(ref payer) = self.config.request_payer {
+                if let Ok(val) = HeaderValue::from_str(payer) {
+                    headers.insert("x-amz-request-payer", val);
+                }
+            }
+
+            if !self.config.no_sign_request {
+                if let Some(ref creds) = self.config.credentials {
+                    let payload_hash = if self.config.unsigned_payload {
+                        "UNSIGNED-PAYLOAD"
+                    } else {
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    };
+                    self.signer.sign_request(
+                        "GET",
+                        &url,
+                        &mut headers,
+                        payload_hash,
+                        creds,
+                        &self.config.region,
+                        Utc::now(),
+                    );
+                }
+            }
+
+            let req = self.http.request(Method::GET, url).headers(headers);
+            let sem = if _size_hint >= 1024 * 1024 {
+                &self.large_sem
+            } else {
+                &self.http_sem
+            };
+            let _http_permit = sem.acquire().await.unwrap();
+
+            match req.send().await {
+                Ok(mut resp) => {
+                    let status = resp.status().as_u16();
+                    if (200..300).contains(&status) {
+                        use std::io::Write;
+                        let mut file = std::fs::File::create(dst_file)
+                            .map_err(|e| S3ClientError::Transport(e.to_string()))?;
+                        let mut total = 0u64;
+                        while let Some(chunk) = resp
+                            .chunk()
+                            .await
+                            .map_err(|e| S3ClientError::Transport(e.to_string()))?
+                        {
+                            file.write_all(&chunk)
+                                .map_err(|e| S3ClientError::Transport(e.to_string()))?;
+                            total += chunk.len() as u64;
+                        }
+                        drop(_http_permit);
+                        return Ok(total);
+                    }
+
+                    let resp_bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| S3ClientError::Transport(e.to_string()))?;
+                    let err = if status == 404 && resp_bytes.is_empty() {
+                        S3ClientError::NotFound(format!("s3://{bucket}/{key}"))
+                    } else {
+                        xml::parse_s3_error(status, &resp_bytes)
+                    };
+
+                    if attempt < max_retries && err.is_retryable() {
+                        attempt += 1;
+                        if let Some(ref st) = self.stats {
+                            st.record_retry();
+                        }
+                        let backoff_ms = (15u64 << attempt.min(7)) + fastrand::u64(0..25);
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
+                    return Err(err);
+                }
+                Err(e) => {
+                    let err = S3ClientError::Transport(e.to_string());
+                    if attempt < max_retries {
+                        attempt += 1;
+                        if let Some(ref st) = self.stats {
+                            st.record_retry();
+                        }
+                        let backoff_ms = (15u64 << attempt.min(7)) + fastrand::u64(0..25);
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
     }
 
     pub async fn put_object(

@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use t3_s3_client::{CompletedPartInfo, ObjectInfo, PutObjectOptions, S3Client};
 use t3_storage::{
-    safe_join, sanitize_relative_path, walk_local_files, BufferPool, DirCache, PositionalReader,
-    PreallocatedWriter,
+    read_file_bytes, safe_join, sanitize_relative_path, walk_local_files, BufferPool, DirCache,
+    PositionalReader, PreallocatedWriter,
 };
 use t3_telemetry::{format_bytes, OutputContext};
 use tokio::sync::{mpsc, Semaphore};
@@ -997,10 +997,10 @@ impl T3Engine {
 
         let part_size = opts.part_size_bytes.max(5 * 1024 * 1024);
         if size <= part_size {
-            let data = fs::read(local_path)
+            let body = read_file_bytes(local_path, size)
                 .with_context(|| format!("Failed to read {}", local_path.display()))?;
             self.s3
-                .put_object(bucket, key, Bytes::from(data), &opts.put_opts)
+                .put_object(bucket, key, body, &opts.put_opts)
                 .await?;
             self.output.stats.record_transfer(size, 1);
         } else {
@@ -1198,13 +1198,12 @@ impl T3Engine {
 
         let part_size = opts.part_size_bytes.max(5 * 1024 * 1024);
         if size <= part_size || opts.concurrency <= 1 {
-            let (_, bytes) = self
+            self.dir_cache.ensure_parent(dst_file)?;
+            let n = self
                 .s3
-                .get_object(bucket, key, None, opts.version_id.as_deref())
+                .download_object_to_file(bucket, key, opts.version_id.as_deref(), dst_file, size)
                 .await?;
-            let writer = PreallocatedWriter::create(dst_file, bytes.len() as u64, &self.dir_cache)?;
-            writer.write_at(0, &bytes)?;
-            self.output.stats.record_transfer(bytes.len() as u64, 1);
+            self.output.stats.record_transfer(n, 1);
         } else {
             let writer = PreallocatedWriter::create(dst_file, size, &self.dir_cache)?;
             let num_parts = size.div_ceil(part_size);
@@ -1223,8 +1222,8 @@ impl T3Engine {
 
                 part_set.spawn(async move {
                     let _p = permit;
-                    let (_, chunk) = c
-                        .get_object(&b, &k, Some((start, end)), vid.as_deref())
+                    let chunk = c
+                        .get_object_bytes(&b, &k, Some((start, end)), vid.as_deref())
                         .await?;
                     w.write_at(start, &chunk)?;
                     Ok::<(), anyhow::Error>(())

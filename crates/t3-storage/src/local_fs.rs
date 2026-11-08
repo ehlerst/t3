@@ -1,7 +1,9 @@
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use dashmap::DashSet;
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -167,6 +169,75 @@ impl PositionalReader {
                 source: e,
             })
     }
+}
+
+struct MmapRegion {
+    ptr: *mut libc::c_void,
+    len: usize,
+}
+
+// Safety: MmapRegion holds a read-only (`PROT_READ`) memory map backed by a file descriptor
+// and is immutable for its lifetime until `munmap` in `Drop`.
+unsafe impl Send for MmapRegion {}
+unsafe impl Sync for MmapRegion {}
+
+impl AsRef<[u8]> for MmapRegion {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+    }
+}
+
+impl Drop for MmapRegion {
+    fn drop(&mut self) {
+        if self.len > 0 && !self.ptr.is_null() {
+            unsafe {
+                let _ = libc::munmap(self.ptr, self.len);
+            }
+        }
+    }
+}
+
+/// Reads a local file into `Bytes`, using zero-copy `mmap` (`PROT_READ, MAP_SHARED`) for files
+/// >= 256 KiB to avoid anonymous heap allocation and redundant page-cache-to-userspace copies.
+pub fn read_file_bytes(path: &Path, size_hint: u64) -> Result<Bytes, StorageError> {
+    if size_hint == 0 {
+        let data = fs::read(path).map_err(|e| StorageError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        return Ok(Bytes::from(data));
+    }
+
+    if size_hint >= 1024 * 1024 {
+        let file = File::open(path).map_err(|e| StorageError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        let len = size_hint as usize;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr != libc::MAP_FAILED && !ptr.is_null() {
+            unsafe {
+                let _ = libc::madvise(ptr, len, libc::MADV_SEQUENTIAL);
+            }
+            return Ok(Bytes::from_owner(MmapRegion { ptr, len }));
+        }
+    }
+
+    let data = fs::read(path).map_err(|e| StorageError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+    Ok(Bytes::from(data))
 }
 
 #[derive(Debug, Clone)]
