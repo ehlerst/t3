@@ -109,13 +109,30 @@ Automated benchmark rating measured via [`crates/t3-benchmarks/`](crates/t3-benc
 
 ## 🚀 Quick Start
 
-### Build from Source
+### 1. Download Pre-Built `amd64` / `arm64` Binary (with SHA-256 Verification)
+```bash
+# Linux amd64 (or t3-linux-arm64 / t3-darwin-arm64 / t3-darwin-amd64)
+curl -sSLO https://github.com/ehlerst/t3/releases/latest/download/t3-linux-amd64.tar.gz
+curl -sSLO https://github.com/ehlerst/t3/releases/latest/download/t3-linux-amd64.tar.gz.sha256
+sha256sum -c t3-linux-amd64.tar.gz.sha256
+tar xzf t3-linux-amd64.tar.gz && sudo mv t3 /usr/local/bin/
+```
+
+### 2. Build from Source
 ```bash
 cargo build --release --bin t3
 ./target/release/t3 version
 ```
 
-### Usage with [RustStack](https://github.com/ehlerst/ruststack) (`http://localhost:4566`) or AWS S3
+### 3. AWS Authentication & EKS IRSA Support
+`t3` implements the standard Amazon AWS credential provider chain out of the box:
+1. **Environment Variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (and `AWS_SECURITY_TOKEN`).
+2. **Amazon EKS IRSA (IAM Roles for Service Accounts)**: Automatically exchanges Kubernetes service account JWT tokens (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` + optional `AWS_ROLE_SESSION_NAME` / `AWS_ENDPOINT_URL_STS`) via AWS STS `AssumeRoleWithWebIdentity`.
+3. **Shared Credentials & Config Files**: `~/.aws/credentials` and `~/.aws/config` (including `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_PROFILE`, profile `endpoint_url`, and profile `role_arn` + `web_identity_token_file`).
+4. **EKS Pod Identity & ECS Container Credentials**: `AWS_CONTAINER_CREDENTIALS_FULL_URI` / `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` with `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` / `AWS_CONTAINER_AUTHORIZATION_TOKEN`.
+5. **Anonymous Access**: `--no-sign-request` for public S3 buckets.
+
+### 4. Usage with [RustStack](https://github.com/ehlerst/ruststack) (`http://localhost:4566`) or AWS S3
 ```bash
 # Create bucket
 t3 --endpoint-url http://localhost:4566 mb s3://ml-datasets
