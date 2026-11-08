@@ -2,16 +2,9 @@ name: release
 
 on:
   push:
-    branches:
-      - main
-      - master
-      - 'v*'
     tags:
       - 'v*'
-  pull_request:
-    branches:
-      - main
-      - master
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -34,30 +27,32 @@ jobs:
         run: cargo test --workspace --all-targets --all-features
 
   build:
-    name: Build - ${{ matrix.target }}
+    name: Build - ${{ matrix.artifact_name }} (${{ matrix.target }})
     needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 targets
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+          # Linux amd64 (static musl binary)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            artifact_name: t3-linux-amd64
 
-          # ARMv8 / AArch64 (64-bit Linux) targets
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+          # Linux arm64 (static musl binary)
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            artifact_name: t3-linux-arm64
 
-          # macOS targets (Apple Silicon & Intel)
+          # macOS arm64 (Apple Silicon)
           - target: aarch64-apple-darwin
             os: macos-latest
+            artifact_name: t3-darwin-arm64
+
+          # macOS amd64 (Intel)
           - target: x86_64-apple-darwin
             os: macos-latest
+            artifact_name: t3-darwin-amd64
 
     steps:
       - name: Checkout
@@ -76,97 +71,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Package
+      - name: Package Binary, Tarball, and SHA256 Checksum
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../t3-${{ matrix.target }}.tar.gz t3
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/t3 dist/${{ matrix.artifact_name }}
+          chmod +x dist/${{ matrix.artifact_name }}
+          tar -C target/${{ matrix.target }}/release -czf dist/${{ matrix.artifact_name }}.tar.gz t3
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+            sha256sum ${{ matrix.artifact_name }}.tar.gz > ${{ matrix.artifact_name }}.tar.gz.sha256
+          else
+            shasum -a 256 ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+            shasum -a 256 ${{ matrix.artifact_name }}.tar.gz > ${{ matrix.artifact_name }}.tar.gz.sha256
+          fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: t3-${{ matrix.target }}
-          path: t3-${{ matrix.target }}.tar.gz
-
-  docker:
-    name: Build & Push Multi-Arch Docker Image
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Pre-compiled Binaries
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Stage Multi-Arch Binaries
-        run: |
-          mkdir -p docker-bin/amd64 docker-bin/arm64
-          tar xzf artifacts/t3-x86_64-unknown-linux-musl/t3-x86_64-unknown-linux-musl.tar.gz -C docker-bin/amd64/
-          tar xzf artifacts/t3-aarch64-unknown-linux-musl/t3-aarch64-unknown-linux-musl.tar.gz -C docker-bin/arm64/
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Check Docker Hub Credentials
-        id: check_docker
-        env:
-          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
-        run: |
-          if [ -n "$DOCKER_TOKEN" ]; then
-            echo "enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "enabled=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Log in to Docker Hub
-        if: steps.check_docker.outputs.enabled == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ehlers320
-          password: ${{ secrets.DOCKER_TOKEN }}
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ehlers320/t3
-          tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
-            type=sha,format=short
-            type=ref,event=tag
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ steps.check_docker.outputs.enabled == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Update Docker Hub Description
-        if: steps.check_docker.outputs.enabled == 'true'
-        uses: peter-evans/dockerhub-description@v4
-        continue-on-error: true
-        with:
-          username: ehlers320
-          password: ${{ secrets.DOCKER_TOKEN }}
-          repository: ehlers320/t3
-          readme-filepath: ./DOCKERHUB.md
-          short-description: "Blazing-fast parallel S3 CLI and drop-in s5cmd replacement in Rust. Sister project to RustStack."
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
 
   release:
-    name: Create GitHub Release
+    name: Publish GitHub Release (amd64 & arm64 Binaries + SHA256)
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
@@ -178,13 +105,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
-      - name: Create Release
+      - name: Generate Combined SHA256SUMS.txt
+        run: |
+          cd artifacts
+          sha256sum t3-linux-amd64 t3-linux-amd64.tar.gz t3-linux-arm64 t3-linux-arm64.tar.gz t3-darwin-amd64 t3-darwin-amd64.tar.gz t3-darwin-arm64 t3-darwin-arm64.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ github.ref_name }}
+          name: t3 ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            artifacts/**/*.tar.gz
+            artifacts/t3-*
+            artifacts/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
