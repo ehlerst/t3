@@ -1,0 +1,56 @@
+name: Performance Benchmarks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Benchmark iterations"
+        required: false
+        default: "10000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  t3-performance:
+    name: t3 Engine & S3 Data-Plane Performance Rating
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run t3 Criterion Micro-benchmarks
+        run: cargo bench -p t3-core
+
+      - name: Run t3 Performance Rating Suite
+        run: |
+          mkdir -p reports
+          cargo run --release -p t3-benchmarks -- \
+            --iterations ${{ github.event.inputs.iterations || '10000' }} \
+            --format markdown \
+            --output reports/t3-benchmark.md
+
+          cargo run --release -p t3-benchmarks -- \
+            --iterations ${{ github.event.inputs.iterations || '10000' }} \
+            --format json \
+            --output reports/t3-benchmark.json
+
+      - name: Publish Benchmark Step Summary
+        run: |
+          cat reports/t3-benchmark.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Benchmark Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3-performance-report
+          path: reports/t3-benchmark.*

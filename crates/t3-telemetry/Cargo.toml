@@ -1,0 +1,16 @@
+[package]
+name = "t3-telemetry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Lock-free atomic telemetry, structured NDJSON logger, and progress bar reporting for t3"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+indicatif.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "t3-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "High-performance local filesystem I/O, bounded buffer pool, and path-traversal guard for t3"
+
+[dependencies]
+tokio.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

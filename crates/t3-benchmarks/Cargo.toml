@@ -1,0 +1,24 @@
+[package]
+name = "t3-benchmarks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Performance benchmark and rating suite for t3 (Turbo 3)"
+
+[dependencies]
+t3-telemetry.workspace = true
+t3-s3-client.workspace = true
+t3-storage.workspace = true
+t3-core.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+http.workspace = true
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+tempfile.workspace = true
+url.workspace = true

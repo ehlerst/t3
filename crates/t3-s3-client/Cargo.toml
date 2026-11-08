@@ -1,0 +1,33 @@
+[package]
+name = "t3-s3-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "High-throughput S3 data-plane client with cached SigV4 signing, multi-endpoint load balancing, and connection pooling"
+
+[dependencies]
+t3-telemetry.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+http.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+quick-xml.workspace = true
+form_urlencoded.workspace = true
+url.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+md-5.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+crc32fast.workspace = true
+hex.workspace = true
+base64.workspace = true
+thiserror.workspace = true
+fastrand.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

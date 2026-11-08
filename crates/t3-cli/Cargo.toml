@@ -1,0 +1,21 @@
+[package]
+name = "t3-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "t3 (Turbo 3) — Blazing-fast S3 CLI and drop-in s5cmd successor in Rust"
+
+[[bin]]
+name = "t3"
+path = "src/main.rs"
+
+[dependencies]
+t3-telemetry.workspace = true
+t3-s3-client.workspace = true
+t3-storage.workspace = true
+t3-core.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

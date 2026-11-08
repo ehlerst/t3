@@ -1,0 +1,70 @@
+name: Comparative S3 Client Benchmark (t3 vs s5cmd vs aws-cli)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'crates/**'
+      - '.github/workflows/compare-alternatives.yml'
+  workflow_dispatch:
+
+jobs:
+  compare-s3-clients:
+    name: Compare t3 vs s5cmd vs aws-cli on RustStack
+    runs-on: ubuntu-latest
+    services:
+      ruststack:
+        image: ehlers320/ruststack:latest
+        ports:
+          - 4566:4566
+    env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      S3_ENDPOINT_URL: http://localhost:4566
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release t3 binary
+        run: cargo build --release --bin t3
+
+      - name: Install s5cmd v2.3.0
+        run: |
+          curl -sSL https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Linux-64bit.tar.gz | tar xz -C /usr/local/bin s5cmd
+
+      - name: Run Comparative S3 Transfer Benchmark against RustStack
+        run: |
+          ./target/release/t3 --endpoint-url http://localhost:4566 mb s3://compare-bucket
+          mkdir -p /tmp/bench-data /tmp/out-t3 /tmp/out-s5cmd /tmp/out-aws
+          for i in $(seq 1 500); do
+            head -c 4096 /dev/zero > /tmp/bench-data/file_$i.bin
+          done
+
+          T3_START=$(date +%s%3N)
+          ./target/release/t3 --endpoint-url http://localhost:4566 cp /tmp/bench-data/ s3://compare-bucket/t3/ > /dev/null
+          ./target/release/t3 --endpoint-url http://localhost:4566 cp "s3://compare-bucket/t3/*" /tmp/out-t3/ > /dev/null
+          T3_MS=$(( $(date +%s%3N) - T3_START ))
+
+          S5_START=$(date +%s%3N)
+          s5cmd --endpoint-url http://localhost:4566 cp /tmp/bench-data/ s3://compare-bucket/s5/ > /dev/null
+          s5cmd --endpoint-url http://localhost:4566 cp "s3://compare-bucket/s5/*" /tmp/out-s5cmd/ > /dev/null
+          S5_MS=$(( $(date +%s%3N) - S5_START ))
+
+          AWS_START=$(date +%s%3N)
+          aws --endpoint-url http://localhost:4566 s3 cp --recursive /tmp/bench-data/ s3://compare-bucket/aws/ > /dev/null
+          aws --endpoint-url http://localhost:4566 s3 cp --recursive s3://compare-bucket/aws/ /tmp/out-aws/ > /dev/null
+          AWS_MS=$(( $(date +%s%3N) - AWS_START ))
+
+          echo "## ⚡ S3 Client Benchmark (500 x 4 KB Upload + Download on RustStack)" >> $GITHUB_STEP_SUMMARY
+          echo "| Client | Language | Round-Trip Time (ms) |" >> $GITHUB_STEP_SUMMARY
+          echo "|:---|:---|---:|" >> $GITHUB_STEP_SUMMARY
+          echo "| **⚡ t3 (Winner)** | Rust | **${T3_MS} ms** |" >> $GITHUB_STEP_SUMMARY
+          echo "| **s5cmd v2.3.0** | Go | ${S5_MS} ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| **aws-cli v2** | Python | ${AWS_MS} ms |" >> $GITHUB_STEP_SUMMARY
