@@ -1737,7 +1737,7 @@ dependencies = [
 
 [[package]]
 name = "t3-benchmarks"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "bytes",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "t3-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "t3-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "t3-s3-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "t3-storage"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "t3-telemetry"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "indicatif",

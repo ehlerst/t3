@@ -1,0 +1,18 @@
+# t3 (Turbo 3): Blazing-Fast S3 CLI & Drop-In `s5cmd` Successor in Rust
+
+> `t3` (Turbo 3) is an ultra-fast, memory-safe `*nix` S3 client and 100% drop-in `s5cmd` replacement written in Rust — sister project to [RustStack](https://github.com/ehlerst/ruststack). Designed to saturate 40–100 Gbps links and NVMe arrays while using up to 4x less memory than `s5cmd` and running up to 197x faster than `aws s3`.
+
+## Quick Facts
+- **Peak Download Bandwidth**: 3,505.8 MiB/s (~3.5 GiB/s) on 256 MiB shards
+- **Peak Upload Bandwidth**: 2,453.0 MiB/s (~2.45 GiB/s) via zero-copy `mmap` reads
+- **Startup Time**: ~3.1 ms cold start (~63x faster than `aws-cli`)
+- **Memory Footprint**: ~6.2–14.3 MiB RSS (bounded slab `BufferPool`, up to 4.3x less RAM than `s5cmd` and 10.7x less than `aws-cli`)
+- **Drop-In `s5cmd` CLI Compatibility**: Supports all 15 `s5cmd` subcommands (`cp`, `mv`, `sync`, `ls`, `rm`, `run`, `cat`, `pipe`, `head`, `du`, `mb`, `rb`, `presign`, `select`, `bucket-version`, `version`)
+- **AWS Auth & Cloud Identity**: Supports `AWS_ACCESS_KEY_ID`, EKS IRSA (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` via STS `AssumeRoleWithWebIdentity`), EKS Pod Identity / ECS Container Credentials, EC2 IMDSv2 (`169.254.169.254`), `credential_process`, and `~/.aws/config` / `~/.aws/credentials`.
+- **Sister Project**: Native companion to [`RustStack`](https://ehlerst.github.io/ruststack/) (`http://localhost:4566`)
+
+## Links
+- Website: https://ehlerst.github.io/t3/
+- Repository: https://github.com/ehlerst/t3
+- Releases (`amd64` & `arm64` binaries + `SHA256SUMS.txt`): https://github.com/ehlerst/t3/releases
+- Sister Project (RustStack): https://ehlerst.github.io/ruststack/

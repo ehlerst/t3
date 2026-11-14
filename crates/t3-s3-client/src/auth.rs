@@ -45,7 +45,7 @@ struct ContainerCredentialsResponse {
     access_key_id: String,
     #[serde(rename = "SecretAccessKey")]
     secret_access_key: String,
-    #[serde(rename = "Token", default)]
+    #[serde(rename = "Token", alias = "SessionToken", default)]
     token: Option<String>,
 }
 
@@ -102,6 +102,27 @@ impl ResolvedConfig {
             })
             .unwrap_or_else(|| format!("https://sts.{region}.amazonaws.com"));
 
+        let raw_endpoint = overrides
+            .endpoint_url
+            .clone()
+            .or_else(|| non_empty_env("S3_ENDPOINT_URL"))
+            .or_else(|| non_empty_env("AWS_ENDPOINT_URL_S3"))
+            .or_else(|| non_empty_env("AWS_ENDPOINT_URL"))
+            .or_else(|| {
+                file_config
+                    .as_ref()
+                    .and_then(|c| c.get("endpoint_url").cloned())
+            })
+            .or_else(|| {
+                file_creds
+                    .as_ref()
+                    .and_then(|c| c.get("endpoint_url").cloned())
+            });
+
+        let is_local_emulator = raw_endpoint.as_deref().is_some_and(|ep| {
+            ep.contains("localhost") || ep.contains("127.0.0.1") || ep.contains("[::1]")
+        });
+
         let credentials = if overrides.no_sign_request {
             None
         } else if let Some(env_creds) = resolve_env_credentials() {
@@ -120,6 +141,17 @@ impl ResolvedConfig {
         } else if let Some(container_creds) = resolve_container_credentials(overrides.no_verify_ssl)
         {
             Some(container_creds)
+        } else if (!is_local_emulator
+            || non_empty_env("AWS_EC2_METADATA_SERVICE_ENDPOINT").is_some())
+            && !is_imds_disabled()
+        {
+            resolve_imds_credentials(None).or_else(|| {
+                Some(AwsCredentials {
+                    access_key_id: "test".to_string(),
+                    secret_access_key: "test".to_string(),
+                    session_token: None,
+                })
+            })
         } else {
             Some(AwsCredentials {
                 access_key_id: "test".to_string(),
@@ -127,23 +159,6 @@ impl ResolvedConfig {
                 session_token: None,
             })
         };
-
-        let raw_endpoint = overrides
-            .endpoint_url
-            .clone()
-            .or_else(|| non_empty_env("S3_ENDPOINT_URL"))
-            .or_else(|| non_empty_env("AWS_ENDPOINT_URL_S3"))
-            .or_else(|| non_empty_env("AWS_ENDPOINT_URL"))
-            .or_else(|| {
-                file_config
-                    .as_ref()
-                    .and_then(|c| c.get("endpoint_url").cloned())
-            })
-            .or_else(|| {
-                file_creds
-                    .as_ref()
-                    .and_then(|c| c.get("endpoint_url").cloned())
-            });
 
         let endpoints = match raw_endpoint {
             Some(ep_str) => ep_str
@@ -244,8 +259,130 @@ fn resolve_profile_credentials(
                 return Some(creds);
             }
         }
+
+        if let Some(cmd) = sec.get("credential_process").filter(|s| !s.is_empty()) {
+            if let Some(creds) = resolve_credential_process(cmd) {
+                return Some(creds);
+            }
+        }
     }
     None
+}
+
+/// Executes an external `credential_process` command configured in `~/.aws/config` or `~/.aws/credentials`.
+pub fn resolve_credential_process(command: &str) -> Option<AwsCredentials> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let parsed: ContainerCredentialsResponse = serde_json::from_slice(&output.stdout).ok()?;
+    if parsed.access_key_id.is_empty() || parsed.secret_access_key.is_empty() {
+        return None;
+    }
+    Some(AwsCredentials {
+        access_key_id: parsed.access_key_id,
+        secret_access_key: parsed.secret_access_key,
+        session_token: parsed.token.filter(|t| !t.is_empty()),
+    })
+}
+
+fn is_imds_disabled() -> bool {
+    non_empty_env("AWS_EC2_METADATA_DISABLED")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
+}
+
+/// 5. Amazon EC2 Instance Metadata Service (`IMDSv2` with `IMDSv1` fallback).
+///
+/// Exchanges a session token via `PUT /latest/api/token` (`X-aws-ec2-metadata-token-ttl-seconds: 21600`),
+/// queries `GET /latest/meta-data/iam/security-credentials/` for the attached IAM role name, and fetches
+/// temporary role credentials from `GET /latest/meta-data/iam/security-credentials/{role}`.
+pub fn resolve_imds_credentials(custom_endpoint: Option<&str>) -> Option<AwsCredentials> {
+    if is_imds_disabled() {
+        return None;
+    }
+
+    let endpoint = custom_endpoint
+        .map(|s| s.to_string())
+        .or_else(|| non_empty_env("AWS_EC2_METADATA_SERVICE_ENDPOINT"))
+        .unwrap_or_else(|| {
+            if non_empty_env("AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE")
+                .is_some_and(|m| m.eq_ignore_ascii_case("IPv6"))
+            {
+                "http://[fd00:ec2::254]".to_string()
+            } else {
+                "http://169.254.169.254".to_string()
+            }
+        });
+    let base = endpoint.trim_end_matches('/').to_string();
+    let is_custom =
+        custom_endpoint.is_some() || non_empty_env("AWS_EC2_METADATA_SERVICE_ENDPOINT").is_some();
+    let timeout = if is_custom {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_millis(250)
+    };
+
+    run_blocking_http(async move {
+        let client = reqwest::Client::builder()
+            .connect_timeout(timeout)
+            .timeout(timeout)
+            .build()
+            .ok()?;
+
+        // Step 1: Acquire IMDSv2 token (falls back to IMDSv1 if /latest/api/token is unsupported)
+        let token_url = format!("{base}/latest/api/token");
+        let imds_token = match client
+            .put(&token_url)
+            .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp
+                .text()
+                .await
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            _ => None,
+        };
+
+        // Step 2: List IAM security credentials role name
+        let role_list_url = format!("{base}/latest/meta-data/iam/security-credentials/");
+        let mut role_req = client.get(&role_list_url);
+        if let Some(ref tok) = imds_token {
+            role_req = role_req.header("X-aws-ec2-metadata-token", tok);
+        }
+        let role_resp = role_req.send().await.ok()?;
+        if !role_resp.status().is_success() {
+            return None;
+        }
+        let roles_text = role_resp.text().await.ok()?;
+        let role_name = roles_text.lines().map(str::trim).find(|l| !l.is_empty())?;
+
+        // Step 3: Fetch temporary IAM credentials JSON for the role
+        let creds_url = format!("{base}/latest/meta-data/iam/security-credentials/{role_name}");
+        let mut creds_req = client.get(&creds_url);
+        if let Some(ref tok) = imds_token {
+            creds_req = creds_req.header("X-aws-ec2-metadata-token", tok);
+        }
+        let creds_resp = creds_req.send().await.ok()?;
+        if !creds_resp.status().is_success() {
+            return None;
+        }
+        let parsed: ContainerCredentialsResponse = creds_resp.json().await.ok()?;
+        if parsed.access_key_id.is_empty() || parsed.secret_access_key.is_empty() {
+            return None;
+        }
+        Some(AwsCredentials {
+            access_key_id: parsed.access_key_id,
+            secret_access_key: parsed.secret_access_key,
+            session_token: parsed.token.filter(|t| !t.is_empty()),
+        })
+    })
 }
 
 /// 4. EKS Pod Identity & ECS Container Credentials (`AWS_CONTAINER_CREDENTIALS_FULL_URI` / `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`).
@@ -531,5 +668,86 @@ endpoint_url = http://localhost:4566
             creds.session_token.as_deref(),
             Some("IRSA_SESSION_TOKEN_VALUE")
         );
+    }
+
+    #[tokio::test]
+    async fn test_ec2_imdsv2_credentials_e2e() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for step in 0..3 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+
+                    let body = match step {
+                        0 => {
+                            assert!(req.starts_with("PUT /latest/api/token"));
+                            assert!(req
+                                .to_ascii_lowercase()
+                                .contains("x-aws-ec2-metadata-token-ttl-seconds: 21600"));
+                            "IMDSV2_SESSION_TOKEN_XYZ".to_string()
+                        }
+                        1 => {
+                            assert!(
+                                req.starts_with("GET /latest/meta-data/iam/security-credentials/")
+                            );
+                            assert!(req
+                                .to_ascii_lowercase()
+                                .contains("x-aws-ec2-metadata-token: imdsv2_session_token_xyz"));
+                            "ec2-highperf-s3-role\n".to_string()
+                        }
+                        _ => {
+                            assert!(req.starts_with(
+                                "GET /latest/meta-data/iam/security-credentials/ec2-highperf-s3-role"
+                            ));
+                            assert!(req
+                                .to_ascii_lowercase()
+                                .contains("x-aws-ec2-metadata-token: imdsv2_session_token_xyz"));
+                            r#"{
+                                "Code": "Success",
+                                "Type": "AWS-HMAC",
+                                "AccessKeyId": "ASIA_IMDSV2_ACCESS_KEY",
+                                "SecretAccessKey": "IMDSV2_SECRET_KEY_999",
+                                "Token": "IMDSV2_SESSION_TOKEN_999",
+                                "Expiration": "2026-11-14T00:00:00Z"
+                            }"#
+                            .to_string()
+                        }
+                    };
+
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            }
+        });
+
+        let imds_url = format!("http://{addr}");
+        let creds = resolve_imds_credentials(Some(&imds_url))
+            .expect("EC2 IMDSv2 3-step handshake should succeed");
+        assert_eq!(creds.access_key_id, "ASIA_IMDSV2_ACCESS_KEY");
+        assert_eq!(creds.secret_access_key, "IMDSV2_SECRET_KEY_999");
+        assert_eq!(
+            creds.session_token.as_deref(),
+            Some("IMDSV2_SESSION_TOKEN_999")
+        );
+    }
+
+    #[test]
+    fn test_credential_process() {
+        let cmd = r#"printf '{"Version":1,"AccessKeyId":"ASIA_PROC_KEY","SecretAccessKey":"PROC_SECRET","SessionToken":"PROC_TOKEN"}'"#;
+        let creds = resolve_credential_process(cmd).expect("credential_process should succeed");
+        assert_eq!(creds.access_key_id, "ASIA_PROC_KEY");
+        assert_eq!(creds.secret_access_key, "PROC_SECRET");
+        assert_eq!(creds.session_token.as_deref(), Some("PROC_TOKEN"));
     }
 }

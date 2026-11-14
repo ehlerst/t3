@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>t3 (Turbo 3) — Blazing-Fast S3 Client in Rust | Drop-In s5cmd &amp; aws-cli Replacement</title>
+  <meta name="description" content="t3 (Turbo 3) is an ultra-fast *nix S3 CLI and 100% drop-in s5cmd replacement written in pure Rust. 3.5 GiB/s download bandwidth, 2.45 GiB/s zero-copy mmap uploads, 7.2x faster sync than s5cmd, 197x faster than aws-cli, with native EKS IRSA, Pod Identity, and EC2 IMDSv2 support." />
+  <meta name="keywords" content="t3, Turbo 3, s5cmd alternative, fast S3 client Rust, aws s3 replacement, high performance S3 CLI, EKS IRSA S3 client, EC2 IMDSv2 S3 CLI, RustStack, MinIO client, Cloudflare R2 CLI, multipart upload Rust" />
+  <meta name="author" content="RustStack Contributors" />
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large" />
+  <link rel="canonical" href="https://ehlerst.github.io/t3/" />
+
+  <!-- Open Graph / Social -->
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://ehlerst.github.io/t3/" />
+  <meta property="og:title" content="t3 (Turbo 3) — Blazing-Fast S3 CLI &amp; Drop-In s5cmd Replacement in Rust" />
+  <meta property="og:description" content="3.5 GiB/s downloads, 2.45 GiB/s zero-copy mmap uploads, up to 4.96x faster than s5cmd and 197x faster than aws-cli. Standalone amd64 &amp; arm64 binaries for Linux and macOS." />
+  <meta property="og:site_name" content="t3 (Turbo 3)" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="t3 (Turbo 3) — High-Performance S3 Client in Rust" />
+  <meta name="twitter:description" content="Drop-in s5cmd successor in pure Rust. 3.5 GiB/s downloads, 2.45 GiB/s uploads, bounded memory, EKS IRSA, Pod Identity, and EC2 IMDSv2." />
+
+  <!-- Structured Data (JSON-LD) -->
+  <script type="application/ld+json">
+  [
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "t3 (Turbo 3)",
+      "headline": "High-Performance Parallel S3 CLI and Drop-In s5cmd Replacement in Rust",
+      "description": "Ultra-fast *nix S3 client and 100% drop-in s5cmd replacement written in pure Rust. Features zero-copy mmap uploads, streaming downloads, L3-cache-aware concurrency, cached SigV4 signing, EKS IRSA, Pod Identity, and EC2 IMDSv2 support.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux, macOS, BSD (*nix)",
+      "softwareVersion": "0.1.2",
+      "license": "https://opensource.org/licenses/Apache-2.0",
+      "url": "https://ehlerst.github.io/t3/",
+      "codeRepository": "https://github.com/ehlerst/t3",
+      "downloadUrl": "https://github.com/ehlerst/t3/releases/latest",
+      "programmingLanguage": "Rust",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      }
+    },
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "How does t3 compare to s5cmd and aws-cli?",
+          "acceptedAnswer": {
+            "type": "Answer",
+            "text": "t3 is a 100% CLI-compatible drop-in replacement for s5cmd written in pure Rust for *nix systems. It achieves up to 3.5 GiB/s download bandwidth and 2.45 GiB/s upload bandwidth, runs up to 4.96x faster than s5cmd v2.3.0 on high-IOPS transfers (7.25x faster on incremental sync) while using up to 4.3x less RAM, and is up to 197x faster than aws-cli v2."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does t3 support AWS EKS IRSA, Pod Identity, and EC2 IMDSv2?",
+          "acceptedAnswer": {
+            "type": "Answer",
+            "text": "Yes. t3 implements the full Amazon AWS credential provider chain out of the box: environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN), EKS IRSA (AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE via STS AssumeRoleWithWebIdentity), EKS Pod Identity / ECS Container Credentials, EC2 Instance Metadata Service (IMDSv2 and IMDSv1), credential_process, and ~/.aws/credentials & ~/.aws/config."
+          }
+        }
+      ]
+    }
+  ]
+  </script>
+
+  <style>
+    :root {
+      --bg: #090d16;
+      --bg-elevated: #0f1624;
+      --bg-card: #131c2e;
+      --bg-code: #0b101b;
+      --border: #1e293b;
+      --border-highlight: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #f97316;
+      --accent-glow: rgba(249, 115, 22, 0.18);
+      --cyan: #38bdf8;
+      --green: #22c55e;
+      --purple: #a855f7;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html {
+      scroll-behavior: smooth;
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+    }
+
+    body {
+      overflow-x: hidden;
+      background-image:
+        radial-gradient(circle at 15% 10%, rgba(249, 115, 22, 0.10), transparent 35%),
+        radial-gradient(circle at 85% 15%, rgba(56, 189, 248, 0.08), transparent 35%);
+    }
+
+    a { color: var(--cyan); text-decoration: none; transition: color 0.15s ease; }
+    a:hover { color: #7dd3fc; }
+
+    .container { max-width: 1200px; margin: 0 auto; padding: 0 1.5rem; }
+
+    header.navbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(12px);
+      background: rgba(9, 13, 22, 0.84);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 4rem;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-weight: 800;
+      font-size: 1.25rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .brand-badge {
+      font-size: 0.72rem;
+      font-family: var(--font-mono);
+      background: rgba(249, 115, 22, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(249, 115, 22, 0.35);
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 1.4rem;
+      font-size: 0.92rem;
+    }
+    .nav-links a { color: var(--text-muted); font-weight: 500; }
+    .nav-links a:hover { color: var(--text); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.55rem 1.1rem;
+      border-radius: 0.5rem;
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: all 0.15s ease;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #f97316, #ea580c);
+      color: #fff !important;
+      box-shadow: 0 4px 20px rgba(249, 115, 22, 0.3);
+    }
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 24px rgba(249, 115, 22, 0.45);
+    }
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text) !important;
+      border-color: var(--border-highlight);
+    }
+    .btn-secondary:hover {
+      border-color: var(--text-muted);
+      background: #1a263d;
+    }
+
+    .hero { padding: 4.5rem 0 3rem; text-align: center; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.9rem;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      color: var(--cyan);
+      font-size: 0.82rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+    }
+    .hero h1 {
+      font-size: clamp(2.25rem, 5vw, 3.7rem);
+      font-weight: 800;
+      line-height: 1.12;
+      letter-spacing: -0.03em;
+      max-width: 920px;
+      margin: 0 auto 1.25rem;
+    }
+    .hero h1 span.gradient {
+      background: linear-gradient(90deg, #f97316, #fbbf24, #38bdf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p.lead {
+      font-size: clamp(1.05rem, 2vw, 1.22rem);
+      color: var(--text-muted);
+      max-width: 800px;
+      margin: 0 auto 1.5rem;
+    }
+    .not-callout {
+      display: inline-block;
+      font-size: 0.86rem;
+      color: #cbd5e1;
+      background: rgba(30, 41, 59, 0.65);
+      border: 1px solid var(--border);
+      padding: 0.45rem 1rem;
+      border-radius: 0.5rem;
+      margin-bottom: 2rem;
+    }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.85rem;
+      margin-bottom: 3rem;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+      gap: 1rem;
+      margin-bottom: 3.5rem;
+    }
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.35rem;
+      text-align: left;
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-card::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--cyan));
+    }
+    .metric-value {
+      font-size: 1.9rem;
+      font-weight: 800;
+      font-family: var(--font-mono);
+      color: var(--text);
+      line-height: 1.15;
+    }
+    .metric-label {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--cyan);
+      margin-top: 0.25rem;
+    }
+    .metric-sub {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+
+    section { padding: 4rem 0; border-top: 1px solid var(--border); }
+    .section-header { margin-bottom: 2.25rem; }
+    .section-tag {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 0.4rem;
+    }
+    .section-title {
+      font-size: clamp(1.65rem, 3vw, 2.25rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.6rem;
+    }
+    .section-desc { color: var(--text-muted); max-width: 760px; font-size: 1.02rem; }
+
+    .bench-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 2rem;
+    }
+    .bench-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+    }
+    .bench-box h3 {
+      font-size: 1.02rem;
+      margin-bottom: 1.1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .bench-winner-pill {
+      font-size: 0.74rem;
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+      border: 1px solid rgba(34, 197, 94, 0.35);
+      padding: 0.15rem 0.55rem;
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      white-space: nowrap;
+    }
+    .bar-row { margin-bottom: 0.95rem; }
+    .bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.83rem;
+      margin-bottom: 0.3rem;
+      font-family: var(--font-mono);
+    }
+    .bar-track {
+      width: 100%;
+      height: 0.65rem;
+      background: var(--bg-code);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .bar-fill { height: 100%; border-radius: 999px; }
+    .bar-t3 { background: linear-gradient(90deg, var(--green), #4ade80); }
+    .bar-s5cmd { background: #38bdf8; }
+    .bar-aws { background: #ef4444; }
+
+    .table-wrap {
+      overflow-x: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      margin-top: 1.5rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    th, td {
+      padding: 0.85rem 1.1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      background: rgba(15, 22, 36, 0.9);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    tr:last-child td { border-bottom: none; }
+    td.mono { font-family: var(--font-mono); }
+    .win { color: var(--green); font-weight: 700; }
+
+    .concept-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1.25rem;
+    }
+    .concept-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.6rem;
+    }
+    .concept-card h3 {
+      font-size: 1.12rem;
+      margin-bottom: 0.6rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .concept-card p { color: var(--text-muted); font-size: 0.92rem; margin-bottom: 0.85rem; }
+    .concept-card ul { list-style: none; font-size: 0.86rem; color: #cbd5e1; }
+    .concept-card ul li { padding: 0.22rem 0; display: flex; align-items: baseline; gap: 0.5rem; }
+    .concept-card ul li::before { content: "→"; color: var(--accent); font-family: var(--font-mono); }
+
+    .tabs-header { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+    .tab-btn {
+      background: var(--bg-card);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      padding: 0.55rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .tab-btn.active, .tab-btn:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(249, 115, 22, 0.12);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .code-window {
+      background: var(--bg-code);
+      border: 1px solid var(--border-highlight);
+      border-radius: 0.75rem;
+      overflow: hidden;
+    }
+    .code-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.6rem 1rem;
+      background: #111827;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .copy-btn {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border-highlight);
+      border-radius: 0.35rem;
+      padding: 0.2rem 0.6rem;
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      cursor: pointer;
+    }
+    .copy-btn:hover { border-color: var(--cyan); }
+    pre {
+      padding: 1.25rem;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      line-height: 1.6;
+      color: #e2e8f0;
+    }
+
+    .services-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+      gap: 0.9rem;
+    }
+    .service-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.65rem;
+      padding: 1.1rem;
+    }
+    .service-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.4rem;
+    }
+    .service-name { font-weight: 700; font-size: 1rem; font-family: var(--font-mono); color: var(--text); }
+    .service-crate {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--cyan);
+      background: rgba(56, 189, 248, 0.1);
+      padding: 0.1rem 0.45rem;
+      border-radius: 0.3rem;
+    }
+    .service-ops { font-size: 0.83rem; color: var(--text-muted); }
+
+    footer {
+      padding: 3rem 0;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+    }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="navbar">
+    <div class="container nav-inner">
+      <a href="#" class="brand">
+        <span>⚡ t3</span>
+        <span class="brand-badge">Turbo 3 · v0.1.2</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#benchmarks">Benchmarks</a>
+        <a href="#quickstart">Quick Start</a>
+        <a href="#auth">AWS Auth &amp; IRSA</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#commands">15 Subcommands</a>
+        <a href="https://ehlerst.github.io/ruststack/">Sister Project: RustStack</a>
+      </nav>
+      <div>
+        <a href="https://github.com/ehlerst/t3/releases/latest" class="btn btn-primary">Download Binary</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Hero -->
+    <div class="hero">
+      <div class="eyebrow">🦀 Pure Rust · *nix Native (`amd64` &amp; `arm64`) · 100% Drop-In `s5cmd` Replacement</div>
+      <h1>The <span class="gradient">Fastest S3 Client</span> for Linux &amp; macOS</h1>
+      <p class="lead">
+        <strong>t3 ("Turbo 3")</strong> is a high-performance parallel S3 CLI and drop-in <code>s5cmd</code> successor written in Rust. Engineered with zero-copy <code>mmap</code> uploads, zero-allocation streaming downloads, and full AWS EKS IRSA, Pod Identity, and EC2 IMDSv2 support.
+      </p>
+      <div class="not-callout">
+        Sister project to <a href="https://ehlerst.github.io/ruststack/"><strong>RustStack</strong></a> · Works seamlessly with AWS S3, Cloudflare R2, MinIO, Ceph, and RustStack
+      </div>
+      <div class="hero-actions">
+        <a href="https://github.com/ehlerst/t3/releases/latest" class="btn btn-primary">⬇ Download amd64 / arm64 Release</a>
+        <a href="https://github.com/ehlerst/t3" class="btn btn-secondary">★ View on GitHub</a>
+        <a href="#benchmarks" class="btn btn-secondary">📊 See Bandwidth Benchmarks</a>
+      </div>
+
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-value">3.51 GiB/s</div>
+          <div class="metric-label">Peak Download Bandwidth</div>
+          <div class="metric-sub">3,505.8 MiB/s (`73.0 ms` for 256 MiB)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">2.45 GiB/s</div>
+          <div class="metric-label">Zero-Copy `mmap` Upload</div>
+          <div class="metric-sub">2,453.0 MiB/s (`208.7 ms` for 512 MiB)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">7.25x</div>
+          <div class="metric-label">Faster Sync than `s5cmd`</div>
+          <div class="metric-sub">197x faster than `aws s3 sync`</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">~6.4 MiB</div>
+          <div class="metric-label">Peak RSS Memory</div>
+          <div class="metric-sub">Up to 4.3x less RAM than `s5cmd`</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Benchmarks -->
+    <section id="benchmarks">
+      <div class="section-header">
+        <div class="section-tag">Verified Performance</div>
+        <h2 class="section-title">Bandwidth &amp; Transfer Time: `t3` vs `s5cmd` v2.3.0 vs `aws-cli` v2</h2>
+        <p class="section-desc">
+          Measured across multi-hundred-megabyte shard workloads and 1,000-object IOPS workloads against <a href="https://ehlerst.github.io/ruststack/">RustStack</a>. Every push to <code>main</code> runs comparative benchmarks in GitHub Actions.
+        </p>
+      </div>
+
+      <div class="bench-grid">
+        <div class="bench-box">
+          <h3>
+            <span>Download 256 MiB (`64 × 4 MiB`)</span>
+            <span class="bench-winner-pill">t3: 3,505.8 MiB/s (73.0 ms)</span>
+          </h3>
+          <div class="bar-row">
+            <div class="bar-label"><span>⚡ t3 (Rust)</span><span class="win">3,505.8 MiB/s · 73.0 ms</span></div>
+            <div class="bar-track"><div class="bar-fill bar-t3" style="width: 100%"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label"><span>s5cmd v2.3.0 (Go)</span><span>3,278.5 MiB/s · 78.1 ms</span></div>
+            <div class="bar-track"><div class="bar-fill bar-s5cmd" style="width: 93%"></div></div>
+          </div>
+        </div>
+
+        <div class="bench-box">
+          <h3>
+            <span>Upload 512 MiB (`64 × 8 MiB`)</span>
+            <span class="bench-winner-pill">1.26x faster (+505 MiB/s)</span>
+          </h3>
+          <div class="bar-row">
+            <div class="bar-label"><span>⚡ t3 (Rust)</span><span class="win">2,453.0 MiB/s · 208.7 ms</span></div>
+            <div class="bar-track"><div class="bar-fill bar-t3" style="width: 100%"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label"><span>s5cmd v2.3.0 (Go)</span><span>1,947.4 MiB/s · 262.9 ms</span></div>
+            <div class="bar-track"><div class="bar-fill bar-s5cmd" style="width: 79%"></div></div>
+          </div>
+        </div>
+
+        <div class="bench-box">
+          <h3>
+            <span>Download 64 MiB (`1,000 × 64 KiB`)</span>
+            <span class="bench-winner-pill">4.15x faster (+1,483 MiB/s)</span>
+          </h3>
+          <div class="bar-row">
+            <div class="bar-label"><span>⚡ t3 (Rust)</span><span class="win">1,954.7 MiB/s · 32.0 ms</span></div>
+            <div class="bar-track"><div class="bar-fill bar-t3" style="width: 100%"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label"><span>s5cmd v2.3.0 (Go)</span><span>471.4 MiB/s · 132.6 ms</span></div>
+            <div class="bar-track"><div class="bar-fill bar-s5cmd" style="width: 24%"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Workload</th>
+              <th>⚡ `t3` (Rust)</th>
+              <th>`s5cmd` v2.3.0 (Go)</th>
+              <th>`aws-cli` v2 (Python)</th>
+              <th>`t3` Advantage</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Upload 512 MiB (`64 × 8 MiB` shards)</strong></td>
+              <td class="mono win">2,453.0 MiB/s (208.7 ms)</td>
+              <td class="mono">1,947.4 MiB/s (262.9 ms)</td>
+              <td class="mono">~210 MiB/s (~2,440 ms)</td>
+              <td class="mono win">1.26x vs s5cmd · 11.7x vs aws-cli</td>
+            </tr>
+            <tr>
+              <td><strong>Upload 256 MiB (`64 × 4 MiB` shards)</strong></td>
+              <td class="mono win">2,366.9 MiB/s (108.2 ms)</td>
+              <td class="mono">1,895.2 MiB/s (135.1 ms)</td>
+              <td class="mono">~205 MiB/s (~1,250 ms)</td>
+              <td class="mono win">1.25x vs s5cmd · 11.5x vs aws-cli</td>
+            </tr>
+            <tr>
+              <td><strong>Download 256 MiB (`64 × 4 MiB` shards)</strong></td>
+              <td class="mono win">3,505.8 MiB/s (73.0 ms)</td>
+              <td class="mono">3,278.5 MiB/s (78.1 ms)</td>
+              <td class="mono">~240 MiB/s (~1,065 ms)</td>
+              <td class="mono win">1.07x local / 1.40x GHA vs s5cmd</td>
+            </tr>
+            <tr>
+              <td><strong>Upload 128 MiB (`256 × 512 KiB` shards)</strong></td>
+              <td class="mono win">1,910.5 MiB/s (67.0 ms)</td>
+              <td class="mono">1,255.0 MiB/s (102.0 ms)</td>
+              <td class="mono">~115 MiB/s (~1,110 ms)</td>
+              <td class="mono win">1.52x vs s5cmd · 16.6x vs aws-cli</td>
+            </tr>
+            <tr>
+              <td><strong>Download 128 MiB (`256 × 512 KiB` shards)</strong></td>
+              <td class="mono win">2,418.5 MiB/s (52.9 ms)</td>
+              <td class="mono">1,815.7 MiB/s (70.5 ms)</td>
+              <td class="mono">~130 MiB/s (~985 ms)</td>
+              <td class="mono win">1.33x local / 1.83x GHA vs s5cmd</td>
+            </tr>
+            <tr>
+              <td><strong>Upload 64 MiB (`1,000 × 64 KiB` files)</strong></td>
+              <td class="mono win">1,613.2 MiB/s (38.7 ms)</td>
+              <td class="mono">511.8 MiB/s (122.1 ms)</td>
+              <td class="mono">~26 MiB/s (~2,450 ms)</td>
+              <td class="mono win">3.15x vs s5cmd · 63.3x vs aws-cli</td>
+            </tr>
+            <tr>
+              <td><strong>Download 64 MiB (`1,000 × 64 KiB` files)</strong></td>
+              <td class="mono win">1,954.7 MiB/s (32.0 ms)</td>
+              <td class="mono">471.4 MiB/s (132.6 ms)</td>
+              <td class="mono">~27 MiB/s (~2,380 ms)</td>
+              <td class="mono win">4.15x vs s5cmd · 74.3x vs aws-cli</td>
+            </tr>
+            <tr>
+              <td><strong>Incremental Sync (`1,000 × 4 KiB` files)</strong></td>
+              <td class="mono win">8.2 ms (7.9 MiB RAM)</td>
+              <td class="mono">58.6 ms (31.1 MiB RAM)</td>
+              <td class="mono">2,222.3 ms (89.4 MiB RAM)</td>
+              <td class="mono win">7.18x vs s5cmd · 197x vs aws-cli</td>
+            </tr>
+            <tr>
+              <td><strong>Batch Delete (`rm` 1,000 keys)</strong></td>
+              <td class="mono win">8.6 ms (8.7 MiB RAM)</td>
+              <td class="mono">43.7 ms (23.5 MiB RAM)</td>
+              <td class="mono">1,771.4 ms (88.6 MiB RAM)</td>
+              <td class="mono win">5.07x vs s5cmd · 128x vs aws-cli</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Quick Start & Auth -->
+    <section id="quickstart">
+      <div class="section-header">
+        <div class="section-tag">Get Started in 10 Seconds</div>
+        <h2 class="section-title">Install Standalone Binary &amp; Transfer at Line Rate</h2>
+        <p class="section-desc">
+          Pre-built static <code>amd64</code> and <code>arm64</code> binaries for Linux and macOS are published on GitHub Releases with SHA-256 checksums.
+        </p>
+      </div>
+
+      <div class="tabs-header">
+        <button class="tab-btn active" onclick="showTab('install', this)">1. Install Binary + Verify SHA256</button>
+        <button class="tab-btn" onclick="showTab('transfer', this)">2. High-Speed cp, sync &amp; run</button>
+        <button class="tab-btn" onclick="showTab('auth-tab', this)">3. EKS IRSA, Pod Identity &amp; EC2 IMDSv2</button>
+      </div>
+
+      <div id="tab-install" class="tab-panel active">
+        <div class="code-window">
+          <div class="code-topbar">
+            <span>bash — Download &amp; verify pre-built binary (Linux amd64 / arm64 or macOS)</span>
+            <button class="copy-btn" onclick="copyCode('code-install', this)">Copy</button>
+          </div>
+          <pre id="code-install"># Choose target: t3-linux-amd64 | t3-linux-arm64 | t3-darwin-arm64 | t3-darwin-amd64
+TARGET="t3-linux-amd64"
+
+curl -sSLO "https://github.com/ehlerst/t3/releases/latest/download/${TARGET}.tar.gz"
+curl -sSLO "https://github.com/ehlerst/t3/releases/latest/download/${TARGET}.tar.gz.sha256"
+sha256sum -c "${TARGET}.tar.gz.sha256"
+
+tar xzf "${TARGET}.tar.gz"
+sudo mv t3 /usr/local/bin/t3
+t3 version</pre>
+        </div>
+      </div>
+
+      <div id="tab-transfer" class="tab-panel">
+        <div class="code-window">
+          <div class="code-topbar">
+            <span>bash — Drop-in s5cmd syntax with --stat and --json telemetry</span>
+            <button class="copy-btn" onclick="copyCode('code-transfer', this)">Copy</button>
+          </div>
+          <pre id="code-transfer"># Upload directory of shards to S3 (or RustStack at http://localhost:4566)
+t3 --stat cp ./training-shards/ s3://ml-bucket/v1/shards/
+
+# Download matching Parquet files with --exclude filter
+t3 --stat cp --exclude "*.tmp" "s3://ml-bucket/v1/shards/*.parquet" ./local-shards/
+
+# Incremental sync with stale object deletion
+t3 --stat sync --delete ./local-shards/ s3://ml-bucket/v1/shards/
+
+# "Beast Mode": Execute thousands of heterogeneous S3 operations in one shared worker pool
+t3 --stat run batch-commands.txt</pre>
+        </div>
+      </div>
+
+      <div id="tab-auth-tab" class="tab-panel">
+        <div class="code-window">
+          <div class="code-topbar">
+            <span>bash — Full Amazon AWS Credential Chain (Env, EKS IRSA, Pod Identity, EC2 IMDSv2)</span>
+            <button class="copy-btn" onclick="copyCode('code-auth', this)">Copy</button>
+          </div>
+          <pre id="code-auth"># 1. Standard AWS Environment Variables
+export AWS_ACCESS_KEY_ID="AKIA..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_SESSION_TOKEN="..." # optional
+
+# 2. Amazon EKS IRSA (Automatically detected when mounted by Kubernetes)
+export AWS_ROLE_ARN="arn:aws:iam::123456789012:role/my-eks-s3-role"
+export AWS_WEB_IDENTITY_TOKEN_FILE="/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+
+# 3. EC2 Instance Metadata Service (IMDSv2) — Automatic on EC2 instances with attached IAM roles!
+# Zero configuration required; exchanges session token via PUT http://169.254.169.254/latest/api/token
+
+t3 cp "s3://production-bucket/checkpoints/*" /mnt/nvme/checkpoints/</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- AWS Auth & Architecture -->
+    <section id="auth">
+      <div class="section-header">
+        <div class="section-tag" id="architecture">Systems Engineering</div>
+        <h2 class="section-title">Why `t3` Beats `s5cmd` and `aws-cli`</h2>
+        <p class="section-desc">
+          Built specifically for `*nix` operating systems (`Linux`, `macOS`, `BSD`) to eliminate kernel-to-userspace memory copies, Go GC pauses, and unpatched `s5cmd` security/scale bugs.
+        </p>
+      </div>
+
+      <div class="concept-grid">
+        <div class="concept-card">
+          <h3>🚀 Zero-Copy `mmap` &amp; Streaming I/O</h3>
+          <p>Avoids anonymous heap allocations and redundant page-cache copies on multi-megabyte transfers.</p>
+          <ul>
+            <li>Uploads ≥ 1 MiB map kernel page-cache pages directly via <code>libc::mmap(PROT_READ, MAP_SHARED)</code> + <code>MADV_SEQUENTIAL</code></li>
+            <li>Downloads stream directly from <code>hyper</code>'s socket buffer to disk, reusing buffers in-place</li>
+            <li>L3-cache-aware large-stream semaphore prevents DRAM cache thrashing</li>
+          </ul>
+        </div>
+
+        <div class="concept-card">
+          <h3>🔐 Complete AWS Cloud Auth (IRSA + IMDSv2)</h3>
+          <p>Unlike <code>s5cmd</code> (built on deprecated <code>aws-sdk-go</code> v1), <code>t3</code> supports modern AWS authentication out of the box.</p>
+          <ul>
+            <li><code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code></li>
+            <li><strong>EKS IRSA</strong>: STS <code>AssumeRoleWithWebIdentity</code> via <code>AWS_WEB_IDENTITY_TOKEN_FILE</code></li>
+            <li><strong>EKS Pod Identity &amp; ECS</strong>: <code>AWS_CONTAINER_CREDENTIALS_FULL_URI</code></li>
+            <li><strong>EC2 IMDSv2</strong>: Token-authenticated metadata credentials (<code>169.254.169.254</code>)</li>
+            <li><strong>Profiles</strong>: <code>~/.aws/config</code> &amp; <code>~/.aws/credentials</code> including <code>credential_process</code> and <code>endpoint_url</code></li>
+          </ul>
+        </div>
+
+        <div class="concept-card">
+          <h3>🛡️ Security &amp; Scale Fixes Over `s5cmd`</h3>
+          <p>Fixes long-standing open bugs in unmaintained <code>peak/s5cmd</code> while preserving 100% CLI flag compatibility.</p>
+          <ul>
+            <li><strong>Path Traversal Guard</strong>: Rejects malicious S3 keys containing <code>../</code> (fixes <code>s5cmd</code> #872)</li>
+            <li><strong>S3-to-S3 Copy &gt; 5 GiB</strong>: Automatic parallel <code>UploadPartCopy</code> (fixes <code>s5cmd</code> #29)</li>
+            <li><strong>Filter-Safe Sync Delete</strong>: <code>sync --delete</code> strictly honors <code>--exclude</code> / <code>--include</code> (fixes <code>s5cmd</code> #815)</li>
+            <li><strong>Cached SigV4 Key</strong>: Derives daily HMAC key once per region (~221,000+ signings/sec/core)</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 15 Subcommands -->
+    <section id="commands">
+      <div class="section-header">
+        <div class="section-tag">100% Drop-In Compatible</div>
+        <h2 class="section-title">All 15 `s5cmd` Subcommands Supported</h2>
+        <p class="section-desc">
+          Global flags (<code>--numworkers</code>, <code>--endpoint-url</code>, <code>--stat</code>, <code>--json</code>, <code>--dry-run</code>, <code>--profile</code>) work either before or after the subcommand.
+        </p>
+      </div>
+
+      <div class="services-grid">
+        <div class="service-card"><div class="service-card-top"><span class="service-name">cp</span><span class="service-crate">Transfer</span></div><div class="service-ops">Parallel upload, streaming/range download, and S3-to-S3 multipart copy (&gt; 5 GiB).</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">sync</span><span class="service-crate">Diff Engine</span></div><div class="service-ops">Concurrent source &amp; destination listing diff with <code>--delete</code>, <code>--size-only</code>, <code>--exact-timestamps</code>.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">mv</span><span class="service-crate">Transfer</span></div><div class="service-ops">High-speed parallel copy followed by atomic source deletion.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">ls</span><span class="service-crate">Listing</span></div><div class="service-ops">Bucket &amp; prefix listing with speculative <code>Delimiter=/</code> fan-out, <code>-e</code>, <code>-H</code>, <code>-s</code>.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">rm</span><span class="service-crate">Batch Delete</span></div><div class="service-ops">Pipelined 1,000-key <code>DeleteObjects</code> batcher across wildcards and versions.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">run</span><span class="service-crate">Beast Mode</span></div><div class="service-ops">Executes batch commands from file or <code>stdin</code> concurrently on the shared worker pool.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">cat</span><span class="service-crate">Streaming</span></div><div class="service-ops">Streams one or more S3 objects (including wildcards) directly to <code>stdout</code>.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">pipe</span><span class="service-crate">Streaming</span></div><div class="service-ops">Streams <code>stdin</code> directly to an S3 object via bounded-memory parallel multipart upload.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">du</span><span class="service-crate">Analytics</span></div><div class="service-ops">Summarizes total bytes and object counts with storage-class grouping (<code>-g</code>, <code>-H</code>).</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">head</span><span class="service-crate">Metadata</span></div><div class="service-ops">Inspects <code>HeadBucket</code> or <code>HeadObject</code> ETag, size, and user metadata.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">mb / rb</span><span class="service-crate">Buckets</span></div><div class="service-ops">Creates or removes S3 buckets (<code>rb --force</code> empties bucket before removal).</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">presign</span><span class="service-crate">Auth</span></div><div class="service-ops">Generates SigV4 query-authenticated presigned <code>GET</code> URLs with custom expiry.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">select</span><span class="service-crate">Query</span></div><div class="service-ops">Executes SQL projections and filters across JSON/NDJSON and CSV objects.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">bucket-version</span><span class="service-crate">Versioning</span></div><div class="service-ops">Gets or sets (<code>Enabled</code> / <code>Suspended</code>) bucket versioning configuration.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">version</span><span class="service-crate">CLI</span></div><div class="service-ops">Prints build version and <code>--install-completion</code> scripts for bash, zsh, and fish.</div></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>
+        <strong>t3 (Turbo 3)</strong> · Sister project to <a href="https://ehlerst.github.io/ruststack/">RustStack</a> ·
+        <a href="https://github.com/ehlerst/t3">GitHub Repository</a> ·
+        <a href="https://github.com/ehlerst/t3/releases">Releases (`amd64` &amp; `arm64`)</a> ·
+        <a href="https://ehlerst.github.io/t3/llms.txt">llms.txt</a>
+      </p>
+      <p style="margin-top: 0.4rem;">Licensed under Apache-2.0 OR MIT.</p>
+    </div>
+  </footer>
+
+  <script>
+    function showTab(id, btn) {
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-' + id).classList.add('active');
+      btn.classList.add('active');
+    }
+    function copyCode(id, btn) {
+      const text = document.getElementById(id).innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        const old = btn.innerText;
+        btn.innerText = 'Copied!';
+        setTimeout(() => btn.innerText = old, 1500);
+      });
+    }
+  </script>
+</body>
+</html>

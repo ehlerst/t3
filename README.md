@@ -5,8 +5,8 @@
 [![CI](https://github.com/ehlerst/t3/actions/workflows/ci.yml/badge.svg)](https://github.com/ehlerst/t3/actions/workflows/ci.yml)
 [![Performance Benchmarks](https://github.com/ehlerst/t3/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/ehlerst/t3/actions/workflows/benchmarks.yml)
 [![Comparative S3 Client Benchmark](https://github.com/ehlerst/t3/actions/workflows/compare-alternatives.yml/badge.svg)](https://github.com/ehlerst/t3/actions/workflows/compare-alternatives.yml)
-[![Release](https://github.com/ehlerst/t3/actions/workflows/release.yml/badge.svg)](https://github.com/ehlerst/t3/actions/workflows/release.yml)
-[![Docker Image](https://img.shields.io/badge/docker-ehlers320%2Ft3-blue.svg)](https://hub.docker.com/r/ehlers320/t3)
+[![Release](https://github.com/ehlerst/t3/actions/workflows/release.yml/badge.svg)](https://github.com/ehlerst/t3/releases/latest)
+[![Website](https://img.shields.io/badge/website-ehlerst.github.io%2Ft3-orange.svg)](https://ehlerst.github.io/t3/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
 `t3` (**Turbo 3**) is an ultra-fast, memory-safe S3 CLI and sync engine written in pure Rust. Built as the sister project to [RustStack](https://github.com/ehlerst/ruststack), `t3` is engineered to outperform both `peak/s5cmd` (Go) and the official `aws s3` CLI (Python) across startup latency, small-object IOPS, large multipart transfers, and peak RSS memory usage.
@@ -124,13 +124,14 @@ cargo build --release --bin t3
 ./target/release/t3 version
 ```
 
-### 3. AWS Authentication & EKS IRSA Support
+### 3. AWS Authentication, EKS IRSA & EC2 IMDSv2 Support
 `t3` implements the standard Amazon AWS credential provider chain out of the box:
 1. **Environment Variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (and `AWS_SECURITY_TOKEN`).
 2. **Amazon EKS IRSA (IAM Roles for Service Accounts)**: Automatically exchanges Kubernetes service account JWT tokens (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` + optional `AWS_ROLE_SESSION_NAME` / `AWS_ENDPOINT_URL_STS`) via AWS STS `AssumeRoleWithWebIdentity`.
-3. **Shared Credentials & Config Files**: `~/.aws/credentials` and `~/.aws/config` (including `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_PROFILE`, profile `endpoint_url`, and profile `role_arn` + `web_identity_token_file`).
+3. **Shared Credentials & Config Files**: `~/.aws/credentials` and `~/.aws/config` (including `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AWS_PROFILE`, profile `endpoint_url`, profile `role_arn` + `web_identity_token_file`, and external `credential_process`).
 4. **EKS Pod Identity & ECS Container Credentials**: `AWS_CONTAINER_CREDENTIALS_FULL_URI` / `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` with `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` / `AWS_CONTAINER_AUTHORIZATION_TOKEN`.
-5. **Anonymous Access**: `--no-sign-request` for public S3 buckets.
+5. **Amazon EC2 Instance Metadata Service (`IMDSv2` / `IMDSv1`)**: Automatically exchanges a session token via `PUT http://169.254.169.254/latest/api/token` (`X-aws-ec2-metadata-token-ttl-seconds: 21600`) and retrieves attached EC2 IAM role credentials (respects `AWS_EC2_METADATA_DISABLED` and `AWS_EC2_METADATA_SERVICE_ENDPOINT`).
+6. **Anonymous Access**: `--no-sign-request` for public S3 buckets.
 
 ### 4. Usage with [RustStack](https://github.com/ehlerst/ruststack) (`http://localhost:4566`) or AWS S3
 ```bash
