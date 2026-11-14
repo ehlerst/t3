@@ -712,19 +712,24 @@
       <div id="tab-install" class="tab-panel active">
         <div class="code-window">
           <div class="code-topbar">
-            <span>bash — Download &amp; verify pre-built binary (Linux amd64 / arm64 or macOS)</span>
+            <span>bash — One-line installer (auto-detects Linux/macOS amd64/arm64 + verifies SHA-256)</span>
             <button class="copy-btn" onclick="copyCode('code-install', this)">Copy</button>
           </div>
-          <pre id="code-install"># Choose target: t3-linux-amd64 | t3-linux-arm64 | t3-darwin-arm64 | t3-darwin-amd64
-TARGET="t3-linux-amd64"
+          <pre id="code-install"># Option 1: One-line installer (verifies SHA-256 checksum automatically)
+curl -sSfL https://ehlerst.github.io/t3/install.sh | sh
 
+# Option 2: Homebrew (macOS &amp; Linux)
+brew install --formula https://raw.githubusercontent.com/ehlerst/t3/main/Formula/t3.rb
+
+# Option 3: Cargo
+cargo install --git https://github.com/ehlerst/t3 t3-cli
+
+# Option 4: Manual tarball download + SHA-256 verification
+TARGET="t3-linux-amd64" # or t3-linux-arm64 | t3-darwin-arm64 | t3-darwin-amd64
 curl -sSLO "https://github.com/ehlerst/t3/releases/latest/download/${TARGET}.tar.gz"
 curl -sSLO "https://github.com/ehlerst/t3/releases/latest/download/${TARGET}.tar.gz.sha256"
 sha256sum -c "${TARGET}.tar.gz.sha256"
-
-tar xzf "${TARGET}.tar.gz"
-sudo mv t3 /usr/local/bin/t3
-t3 version</pre>
+tar xzf "${TARGET}.tar.gz" &amp;&amp; sudo mv t3 /usr/local/bin/t3</pre>
         </div>
       </div>
 

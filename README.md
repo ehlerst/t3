@@ -109,7 +109,26 @@ Automated benchmark rating measured via [`crates/t3-benchmarks/`](crates/t3-benc
 
 ## 🚀 Quick Start
 
-### 1. Download Pre-Built `amd64` / `arm64` Binary (with SHA-256 Verification)
+### 1. One-Line Installer (Linux & macOS · `amd64` & `arm64` · SHA-256 Verified)
+```bash
+curl -sSfL https://ehlerst.github.io/t3/install.sh | sh
+```
+Or install to a custom directory / specific version:
+```bash
+T3_VERSION=v0.1.2 T3_INSTALL_DIR="$HOME/.local/bin" \
+  sh -c "$(curl -sSfL https://raw.githubusercontent.com/ehlerst/t3/main/install.sh)"
+```
+
+### 2. Homebrew (macOS & Linux) or Cargo
+```bash
+# Homebrew formula
+brew install --formula https://raw.githubusercontent.com/ehlerst/t3/main/Formula/t3.rb
+
+# Cargo (from source)
+cargo install --git https://github.com/ehlerst/t3 t3-cli
+```
+
+### 3. Manual Binary Download (with SHA-256 Verification)
 ```bash
 # Linux amd64 (or t3-linux-arm64 / t3-darwin-arm64 / t3-darwin-amd64)
 curl -sSLO https://github.com/ehlerst/t3/releases/latest/download/t3-linux-amd64.tar.gz
@@ -118,13 +137,7 @@ sha256sum -c t3-linux-amd64.tar.gz.sha256
 tar xzf t3-linux-amd64.tar.gz && sudo mv t3 /usr/local/bin/
 ```
 
-### 2. Build from Source
-```bash
-cargo build --release --bin t3
-./target/release/t3 version
-```
-
-### 3. AWS Authentication, EKS IRSA & EC2 IMDSv2 Support
+### 4. AWS Authentication, EKS IRSA & EC2 IMDSv2 Support
 `t3` implements the standard Amazon AWS credential provider chain out of the box:
 1. **Environment Variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (and `AWS_SECURITY_TOKEN`).
 2. **Amazon EKS IRSA (IAM Roles for Service Accounts)**: Automatically exchanges Kubernetes service account JWT tokens (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` + optional `AWS_ROLE_SESSION_NAME` / `AWS_ENDPOINT_URL_STS`) via AWS STS `AssumeRoleWithWebIdentity`.

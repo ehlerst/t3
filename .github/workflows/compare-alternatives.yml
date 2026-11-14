@@ -23,7 +23,7 @@ jobs:
       S3_ENDPOINT_URL: http://localhost:4566
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -198,7 +198,7 @@ jobs:
           cat reports/compare-s3-clients.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Comparative Benchmark Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compare-s3-clients-report
           path: reports/compare-s3-clients.md
