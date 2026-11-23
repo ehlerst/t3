@@ -19,7 +19,7 @@
 
 Measured end-to-end transfer time and sustained throughput across dataset sizes from `4 MiB` up to `512 MiB` against [RustStack](https://github.com/ehlerst/ruststack):
 
-| Dataset & Direction | **⚡ `t3` v0.1.0 Bandwidth (Time)** | `s5cmd` v2.3.0 Bandwidth (Time) | `t3` Bandwidth & Time Advantage |
+| Dataset & Direction | **⚡ `t3` v0.2.0 Bandwidth (Time)** | `s5cmd` v2.3.0 Bandwidth (Time) | `t3` Bandwidth & Time Advantage |
 |:---|---:|---:|:---|
 | **Upload 512 MiB (`64 × 8 MiB` shards)** | **2,453.0 MiB/s (`208.7 ms`)** | 1,947.4 MiB/s (`262.9 ms`) | **1.26x faster** (+505.6 MiB/s) |
 | **Upload 256 MiB (`64 × 4 MiB` shards)** | **2,366.9 MiB/s (`108.2 ms`)** | 1,895.2 MiB/s (`135.1 ms`) | **1.25x faster** (+471.7 MiB/s) |
@@ -35,7 +35,7 @@ Measured end-to-end transfer time and sustained throughput across dataset sizes 
 
 Measured end-to-end wall-clock execution time and peak resident memory (`RSS`) across 1,000 × 4 KiB objects against [RustStack](https://github.com/ehlerst/ruststack):
 
-| Workload (1,000 × 4 KiB Objects) | **⚡ `t3` v0.1.0 (Rust)** | `s5cmd` v2.3.0 (Go) | `t3` Speedup | `t3` Memory Reduction |
+| Workload (1,000 × 4 KiB Objects) | **⚡ `t3` v0.2.0 (Rust)** | `s5cmd` v2.3.0 (Go) | `t3` Speedup | `t3` Memory Reduction |
 |:---|---:|---:|:---|:---|
 | **Cold Startup (`version`)** | **3.1 ms** (6.2 MiB) | 4.8 ms (13.2 MiB) | **1.55x faster** | **2.12x less RAM** |
 | **Parallel Upload (`cp 1,000 files → S3`)** | **17.6 ms** (14.3 MiB) | 87.4 ms (33.6 MiB) | **4.96x faster** | **2.35x less RAM** |
@@ -139,7 +139,7 @@ curl -sSfL https://ehlerst.github.io/t3/install.sh | sh
 ```
 Or install to a custom directory / specific version:
 ```bash
-T3_VERSION=v0.1.2 T3_INSTALL_DIR="$HOME/.local/bin" \
+T3_VERSION=v0.2.0 T3_INSTALL_DIR="$HOME/.local/bin" \
   sh -c "$(curl -sSfL https://raw.githubusercontent.com/ehlerst/t3/main/install.sh)"
 ```
 
@@ -170,7 +170,35 @@ tar xzf t3-linux-amd64.tar.gz && sudo mv t3 /usr/local/bin/
 5. **Amazon EC2 Instance Metadata Service (`IMDSv2` / `IMDSv1`)**: Automatically exchanges a session token via `PUT http://169.254.169.254/latest/api/token` (`X-aws-ec2-metadata-token-ttl-seconds: 21600`) and retrieves attached EC2 IAM role credentials (respects `AWS_EC2_METADATA_DISABLED` and `AWS_EC2_METADATA_SERVICE_ENDPOINT`).
 6. **Anonymous Access**: `--no-sign-request` for public S3 buckets.
 
-### 4. Usage with [RustStack](https://github.com/ehlerst/ruststack) (`http://localhost:4566`) or AWS S3
+### 5. `v0.2.0` CI Cache, CAS Pointer & Fleet Examples
+```bash
+# 1. Single-object compressed tar-stream save & restore (auto-detects lz4 / zstd / gzip / raw tar)
+t3 --json-stats tar-sync \
+  --metadata gh-repo=owner/repo --metadata run-id=12345 --metadata generation=7 \
+  ./buildx-cache/ s3://ci-cache-bucket/caches/gen-7.tar.lz4
+
+t3 --json-stats tar-sync s3://ci-cache-bucket/caches/gen-7.tar.lz4 ./restored-cache/
+# Or via cp --tar-stream (--compression lz4|zstd|gzip|none|auto):
+t3 cp --tar-stream --compression zstd ./buildx-cache/ s3://ci-cache-bucket/caches/gen-7.tar.zst
+
+# 2. Fast HEAD existence check with stable exit codes (0 = exists, 3 = not found / cache miss, 1 = S3 error)
+t3 exists s3://ci-cache-bucket/pointers/_pointer
+
+# 3. Compare-And-Swap (CAS) atomic pointer updates (exit code 4 on 412 PreconditionFailed conflict)
+# First writer creates pointer atomically:
+t3 cp --if-none-match "*" ./_pointer s3://ci-cache-bucket/pointers/_pointer
+# Subsequent generation updates pointer via ETag CAS:
+t3 cp --if-match '"d41d8cd98f00b204e9800998ecf8427e"' ./_pointer s3://ci-cache-bucket/pointers/_pointer
+
+# 4. Resumable multipart ranged download (picks up existing .t3part & .t3part.meta ranges on retry)
+t3 cp --continue s3://ci-cache-bucket/layers/large-2gb.tar.zst ./large-2gb.tar.zst
+
+# 5. Age-scoped garbage collection of stale staging prefixes
+t3 rm --older-than 24h "s3://ci-cache-bucket/staging/*"
+t3 sync --delete --exclude-newer-than 2h ./active-cache/ s3://ci-cache-bucket/prefix/
+```
+
+### 6. General Usage with [RustStack](https://github.com/ehlerst/ruststack) (`http://localhost:4566`) or AWS S3
 ```bash
 # Create bucket
 t3 --endpoint-url http://localhost:4566 mb s3://ml-datasets
