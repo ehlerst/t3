@@ -68,12 +68,40 @@ async fn spawn_mock_s3() -> (String, MockS3State, tokio::task::JoinHandle<()>) {
     (format!("http://{addr}"), state, handle)
 }
 
+fn require_content_length(headers: &HeaderMap, body_len: usize) -> Option<Response> {
+    let Some(cl_val) = headers.get("content-length").and_then(|v| v.to_str().ok()) else {
+        let xml = "<Error><Code>MissingContentLength</Code><Message>You must provide the Content-Length HTTP header.</Message></Error>";
+        return Some(
+            Response::builder()
+                .status(StatusCode::LENGTH_REQUIRED)
+                .header("content-type", "application/xml")
+                .body(Body::from(xml))
+                .unwrap(),
+        );
+    };
+    if cl_val.parse::<usize>().ok() != Some(body_len) {
+        let xml = "<Error><Code>IncompleteBody</Code><Message>Content-Length did not match body length.</Message></Error>";
+        return Some(
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/xml")
+                .body(Body::from(xml))
+                .unwrap(),
+        );
+    }
+    None
+}
+
 async fn bucket_put(
     State(state): State<MockS3State>,
     AxumPath(bucket): AxumPath<String>,
     Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> Response {
+    if let Some(err_resp) = require_content_length(&headers, body.len()) {
+        return err_resp;
+    }
     if q.contains_key("versioning") {
         let txt = String::from_utf8_lossy(&body);
         let status = if txt.contains("Enabled") {
@@ -85,7 +113,10 @@ async fn bucket_put(
     } else {
         state.buckets.insert(bucket, "Unversioned".to_string());
     }
-    StatusCode::OK
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::empty())
+        .unwrap()
 }
 
 async fn bucket_delete(
@@ -110,8 +141,12 @@ async fn bucket_head(
 async fn bucket_post(
     State(state): State<MockS3State>,
     AxumPath(bucket): AxumPath<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Some(err_resp) = require_content_length(&headers, body.len()) {
+        return err_resp;
+    }
     let text = String::from_utf8_lossy(&body);
     let mut xml_out = String::from("<DeleteResult>");
     for part in text.split("<Key>").skip(1) {
@@ -184,6 +219,9 @@ async fn object_put(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Some(err_resp) = require_content_length(&headers, body.len()) {
+        return err_resp;
+    }
     let prev = state.fail_next_puts.load(Ordering::SeqCst);
     if prev > 0 {
         state.fail_next_puts.fetch_sub(1, Ordering::SeqCst);
@@ -239,7 +277,12 @@ async fn object_post(
     State(state): State<MockS3State>,
     AxumPath((bucket, key)): AxumPath<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
+    if let Some(err_resp) = require_content_length(&headers, body.len()) {
+        return err_resp;
+    }
     if q.contains_key("uploads") {
         let xml_out = format!(
             "<InitiateMultipartUploadResult><Bucket>{bucket}</Bucket><Key>{key}</Key><UploadId>uid123</UploadId></InitiateMultipartUploadResult>"
@@ -366,6 +409,7 @@ async fn test_full_s3_lifecycle_multipart_sync_and_security() {
     mock_state.fail_next_puts.store(2, Ordering::SeqCst);
     let tmp_src = tempfile::tempdir().unwrap();
     fs::write(tmp_src.path().join("hello.txt"), b"hello world").unwrap();
+    fs::write(tmp_src.path().join("empty.txt"), b"").unwrap();
     fs::write(tmp_src.path().join("skip.tmp"), b"should be excluded").unwrap();
 
     let cp_opts = CopyOptions {
@@ -381,10 +425,27 @@ async fn test_full_s3_lifecycle_multipart_sync_and_security() {
         .await
         .unwrap();
 
+    // Server-side single-request CopyObject (empty PUT body with x-amz-copy-source, verifying Content-Length: 0)
+    engine
+        .cp(
+            "s3://test-bucket/dir/hello.txt",
+            "s3://test-bucket/dir/hello_copied.txt",
+            &cp_opts,
+        )
+        .await
+        .unwrap();
+
     assert!(output.stats.snapshot().retries >= 2);
     assert!(mock_state
         .objects
         .contains_key(&("test-bucket".to_string(), "dir/hello.txt".to_string())));
+    assert!(mock_state
+        .objects
+        .contains_key(&("test-bucket".to_string(), "dir/empty.txt".to_string())));
+    assert!(mock_state.objects.contains_key(&(
+        "test-bucket".to_string(),
+        "dir/hello_copied.txt".to_string()
+    )));
     assert!(!mock_state
         .objects
         .contains_key(&("test-bucket".to_string(), "dir/skip.tmp".to_string())));
