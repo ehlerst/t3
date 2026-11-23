@@ -6,8 +6,8 @@ use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use t3_core::{
-    parse_duration_secs, parse_run_line, CopyOptions, DuOptions, LsOptions, RmOptions, SyncOptions,
-    T3Engine,
+    classify_error_exit_code, parse_duration_secs, parse_run_line, CopyOptions, DuOptions,
+    FilterError, LsOptions, RmOptions, SyncOptions, T3Engine, T3ExitCode, TarCompression,
 };
 use t3_s3_client::{ConfigOverrides, PutObjectOptions, ResolvedConfig, S3Client};
 use t3_telemetry::{LogLevel, OutputContext};
@@ -30,7 +30,13 @@ pub struct Cli {
     pub numworkers: isize,
 
     /// Max retries per request with exponential backoff & jitter
-    #[arg(short = 'r', long = "retry-count", default_value_t = 10, global = true)]
+    #[arg(
+        short = 'r',
+        long = "retry-count",
+        visible_alias = "retry-limit",
+        default_value_t = 10,
+        global = true
+    )]
     pub retry_count: u32,
 
     /// Custom S3 endpoint URL (supports comma-separated URLs for round-robin load balancing)
@@ -73,6 +79,14 @@ pub struct Cli {
     #[arg(long = "stat", default_value_t = false, global = true)]
     pub stat: bool,
 
+    /// Emit machine-readable per-operation JSON statistics summary
+    #[arg(long = "json-stats", default_value_t = false, global = true)]
+    pub json_stats: bool,
+
+    /// Write machine-readable per-operation JSON statistics summary to a file
+    #[arg(long = "json-stats-file", global = true)]
+    pub json_stats_file: Option<PathBuf>,
+
     /// Log level (trace, debug, info, error)
     #[arg(long = "log", default_value = "info", global = true)]
     pub log: String,
@@ -95,6 +109,13 @@ pub enum Commands {
 
     /// Synchronize a directory tree or S3 prefix to another
     Sync(SyncArgs),
+
+    /// Package and stream a directory as a single compressed tar object to/from S3
+    #[command(name = "tar-sync")]
+    TarSync(TarSyncArgs),
+
+    /// Check if an S3 bucket or object exists via fast HEAD probe (exit 0 if found, 3 if not found)
+    Exists(ExistsArgs),
 
     /// List buckets or objects
     Ls(LsArgs),
@@ -164,9 +185,38 @@ pub struct SharedTransferFlags {
     #[arg(short = 'c', long = "concurrency", default_value_t = 5)]
     pub concurrency: usize,
 
-    /// Multipart chunk size in MiB (minimum 5 MiB)
-    #[arg(short = 'p', long = "part-size", default_value_t = 50)]
-    pub part_size: u64,
+    /// Multipart chunk size in MiB (minimum 5 MiB; adaptive by object size when omitted)
+    #[arg(short = 'p', long = "part-size")]
+    pub part_size: Option<u64>,
+
+    /// Resume interrupted multipart range downloads using .t3part state files
+    #[arg(
+        long = "continue",
+        visible_alias = "resume",
+        short = 'C',
+        default_value_t = false
+    )]
+    pub resume: bool,
+
+    /// Stream directory tree into/from a single S3 tar archive object
+    #[arg(long = "tar-stream", default_value_t = false)]
+    pub tar_stream: bool,
+
+    /// Compression codec for tar-stream mode (auto, lz4, zstd, gzip, none)
+    #[arg(
+        long = "compression",
+        visible_alias = "compress",
+        default_value = "auto"
+    )]
+    pub compression: String,
+
+    /// Conditional write: only succeed if destination object ETag matches (Compare-And-Swap)
+    #[arg(long = "if-match")]
+    pub if_match: Option<String>,
+
+    /// Conditional write: only succeed if destination ETag does not match (or '*' for create-only)
+    #[arg(long = "if-none-match")]
+    pub if_none_match: Option<String>,
 
     /// Flatten source directory hierarchy
     #[arg(short = 'f', long = "flatten", default_value_t = false)]
@@ -262,17 +312,37 @@ pub struct SharedTransferFlags {
 }
 
 impl SharedTransferFlags {
-    pub fn to_copy_options(&self, delete_source: bool) -> CopyOptions {
+    pub fn to_copy_options(&self, delete_source: bool) -> Result<CopyOptions> {
         let mut meta_map = HashMap::new();
         for kv in &self.metadata {
             if let Some((k, v)) = kv.split_once('=') {
-                meta_map.insert(k.trim().to_string(), v.trim().to_string());
+                let key = k.trim();
+                if key.is_empty() {
+                    return Err(
+                        FilterError::InvalidPattern(format!("Invalid --metadata '{kv}'")).into(),
+                    );
+                }
+                meta_map.insert(key.to_string(), v.trim().to_string());
+            } else {
+                return Err(FilterError::InvalidPattern(format!(
+                    "Invalid --metadata '{kv}' (expected Key=Value)"
+                ))
+                .into());
             }
         }
 
-        CopyOptions {
+        let explicit_part_size = self.part_size.map(|p| p.max(5) * 1024 * 1024);
+        let part_size_bytes = explicit_part_size.unwrap_or(16 * 1024 * 1024);
+        let compression = TarCompression::parse(&self.compression)
+            .map_err(|e| FilterError::InvalidPattern(e.to_string()))?;
+
+        Ok(CopyOptions {
             concurrency: self.concurrency.max(1),
-            part_size_bytes: self.part_size.max(5) * 1024 * 1024,
+            part_size_bytes,
+            explicit_part_size,
+            resume: self.resume,
+            tar_stream: self.tar_stream,
+            compression,
             flatten: self.flatten,
             no_clobber: self.no_clobber,
             if_size_differ: self.if_size_differ,
@@ -297,10 +367,31 @@ impl SharedTransferFlags {
                 metadata: meta_map,
                 metadata_directive: self.metadata_directive.clone(),
                 checksum_crc32c: false,
+                if_match: self.if_match.clone(),
+                if_none_match: self.if_none_match.clone(),
             },
             delete_source,
-        }
+        })
     }
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TarSyncArgs {
+    #[command(flatten)]
+    pub flags: SharedTransferFlags,
+    /// Source local directory or S3 archive URI
+    pub src: String,
+    /// Destination S3 archive URI or local directory
+    pub dst: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ExistsArgs {
+    /// Specific object version ID
+    #[arg(long = "version-id")]
+    pub version_id: Option<String>,
+    /// Target S3 URI (s3://bucket or s3://bucket/key)
+    pub target: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -326,6 +417,10 @@ pub struct SyncArgs {
     /// Require exact timestamp match instead of source-newer
     #[arg(long = "exact-timestamps", default_value_t = false)]
     pub exact_timestamps: bool,
+
+    /// When --delete is enabled, preserve destination objects modified more recently than this duration (e.g. 2h, 30m, 7d)
+    #[arg(long = "exclude-newer-than")]
+    pub exclude_newer_than: Option<String>,
 
     #[command(flatten)]
     pub flags: SharedTransferFlags,
@@ -379,6 +474,10 @@ pub struct RmArgs {
     /// Delete all versions of matched objects
     #[arg(long = "all-versions", default_value_t = false)]
     pub all_versions: bool,
+
+    /// Only delete objects whose LastModified timestamp is older than this duration (e.g. 24h, 7d, 30m)
+    #[arg(long = "older-than")]
+    pub older_than: Option<String>,
 
     /// Target S3 URIs (one or more)
     #[arg(required = true)]
@@ -481,20 +580,32 @@ struct BatchSubcommandParser {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = e.print();
+            let code = if e.use_stderr() {
+                T3ExitCode::UsageError.as_u8()
+            } else {
+                T3ExitCode::Success.as_u8()
+            };
+            return ExitCode::from(code);
+        }
+    };
 
     if let Some(ref shell) = cli.install_completion {
         print_completion_script(shell);
-        return ExitCode::SUCCESS;
+        return ExitCode::from(T3ExitCode::Success.as_u8());
     }
 
     let Some(ref cmd) = cli.command else {
         eprintln!("Error: subcommand required (try `t3 --help`)");
-        return ExitCode::FAILURE;
+        return ExitCode::from(T3ExitCode::UsageError.as_u8());
     };
 
     let show_progress = match cmd {
         Commands::Cp(a) | Commands::Mv(a) => a.flags.show_progress,
+        Commands::TarSync(a) => a.flags.show_progress,
         Commands::Sync(a) => a.flags.show_progress,
         Commands::Pipe(a) => a.flags.show_progress,
         _ => false,
@@ -506,7 +617,8 @@ async fn main() -> ExitCode {
         cli.dry_run,
         show_progress,
         LogLevel::parse(&cli.log),
-    );
+    )
+    .with_json_stats(cli.json_stats, cli.json_stats_file.clone());
 
     let overrides = ConfigOverrides {
         endpoint_url: cli.endpoint_url.clone(),
@@ -526,21 +638,51 @@ async fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => {
             output.emit_error("init", "s3-client", &e.to_string());
-            return ExitCode::FAILURE;
+            return ExitCode::from(T3ExitCode::GeneralError.as_u8());
         }
     };
 
+    let (cmd_name, stdout_is_stream) = command_metadata(cmd);
     let engine = T3Engine::new(s3, output.clone(), cli.numworkers);
     let res = execute_command(&engine, cmd).await;
 
-    output.print_stats();
-
-    match res {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            output.emit_error("t3", "", &e.to_string());
-            ExitCode::FAILURE
+    let exit_code = match res {
+        Ok(()) => T3ExitCode::Success,
+        Err(ref e) => {
+            let code = classify_error_exit_code(e);
+            if !(matches!(cmd, Commands::Exists(_)) && code == T3ExitCode::NotFound) {
+                output.emit_error(cmd_name, "", &e.to_string());
+            } else {
+                output.stats.record_op_error();
+            }
+            code
         }
+    };
+
+    output.emit_final_stats(cmd_name, exit_code.as_u8(), stdout_is_stream);
+    ExitCode::from(exit_code.as_u8())
+}
+
+fn command_metadata(cmd: &Commands) -> (&'static str, bool) {
+    match cmd {
+        Commands::Cp(a) => ("cp", a.dst == "-"),
+        Commands::Mv(_) => ("mv", false),
+        Commands::Sync(_) => ("sync", false),
+        Commands::TarSync(_) => ("tar-sync", false),
+        Commands::Exists(_) => ("exists", false),
+        Commands::Ls(_) => ("ls", false),
+        Commands::Rm(_) => ("rm", false),
+        Commands::Run(_) => ("run", false),
+        Commands::Cat(_) => ("cat", true),
+        Commands::Pipe(_) => ("pipe", false),
+        Commands::Head(_) => ("head", false),
+        Commands::Du(_) => ("du", false),
+        Commands::Mb { .. } => ("mb", false),
+        Commands::Rb { .. } => ("rb", false),
+        Commands::Presign { .. } => ("presign", false),
+        Commands::Select(_) => ("select", false),
+        Commands::BucketVersion { .. } => ("bucket-version", false),
+        Commands::Version => ("version", false),
     }
 }
 
@@ -554,19 +696,37 @@ async fn execute_command(engine: &T3Engine, cmd: &Commands) -> Result<()> {
 async fn execute_single_command(engine: &T3Engine, cmd: &Commands) -> Result<()> {
     match cmd {
         Commands::Cp(args) => {
-            let opts = args.flags.to_copy_options(false);
+            let opts = args.flags.to_copy_options(false)?;
             engine.cp(&args.src, &args.dst, &opts).await
         }
         Commands::Mv(args) => {
-            let opts = args.flags.to_copy_options(true);
+            let opts = args.flags.to_copy_options(true)?;
             engine.cp(&args.src, &args.dst, &opts).await
         }
+        Commands::TarSync(args) => {
+            let opts = args.flags.to_copy_options(false)?;
+            engine.tar_sync(&args.src, &args.dst, &opts).await
+        }
+        Commands::Exists(args) => {
+            let _ = engine
+                .exists(&args.target, args.version_id.as_deref())
+                .await?;
+            Ok(())
+        }
         Commands::Sync(args) => {
+            let exclude_newer_than_secs = match args.exclude_newer_than.as_deref() {
+                Some(s) => Some(
+                    parse_duration_secs(s)
+                        .map_err(|e| FilterError::InvalidPattern(e.to_string()))?,
+                ),
+                None => None,
+            };
             let opts = SyncOptions {
-                copy_opts: args.flags.to_copy_options(false),
+                copy_opts: args.flags.to_copy_options(false)?,
                 delete: args.delete,
                 size_only: args.size_only,
                 exact_timestamps: args.exact_timestamps,
+                exclude_newer_than_secs,
             };
             engine.sync(&args.src, &args.dst, &opts).await
         }
@@ -580,19 +740,27 @@ async fn execute_single_command(engine: &T3Engine, cmd: &Commands) -> Result<()>
             engine.ls(args.target.as_deref(), &opts).await
         }
         Commands::Rm(args) => {
+            let older_than_secs = match args.older_than.as_deref() {
+                Some(s) => Some(
+                    parse_duration_secs(s)
+                        .map_err(|e| FilterError::InvalidPattern(e.to_string()))?,
+                ),
+                None => None,
+            };
             let opts = RmOptions {
                 raw: args.raw,
                 includes: args.include.clone(),
                 excludes: args.exclude.clone(),
                 version_id: args.version_id.clone(),
                 all_versions: args.all_versions,
+                older_than_secs,
             };
             engine.rm(&args.targets, &opts).await
         }
         Commands::Run(_) => bail!("Nested `run` command inside `run` batch is not allowed"),
         Commands::Cat(args) => engine.cat(&args.targets, args.version_id.as_deref()).await,
         Commands::Pipe(args) => {
-            let opts = args.flags.to_copy_options(false);
+            let opts = args.flags.to_copy_options(false)?;
             engine.pipe(&args.target, &opts).await
         }
         Commands::Head(args) => engine.head(&args.target, args.version_id.as_deref()).await,

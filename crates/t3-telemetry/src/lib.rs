@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,8 +33,10 @@ pub struct TelemetryStats {
     pub objects_transferred: AtomicU64,
     pub objects_listed: AtomicU64,
     pub objects_deleted: AtomicU64,
+    pub objects_skipped: AtomicU64,
     pub parts_transferred: AtomicU64,
     pub bytes_transferred: AtomicU64,
+    pub resumed_bytes: AtomicU64,
     pub ops_succeeded: AtomicU64,
     pub ops_failed: AtomicU64,
     pub retries: AtomicU64,
@@ -52,8 +55,10 @@ impl TelemetryStats {
             objects_transferred: AtomicU64::new(0),
             objects_listed: AtomicU64::new(0),
             objects_deleted: AtomicU64::new(0),
+            objects_skipped: AtomicU64::new(0),
             parts_transferred: AtomicU64::new(0),
             bytes_transferred: AtomicU64::new(0),
+            resumed_bytes: AtomicU64::new(0),
             ops_succeeded: AtomicU64::new(0),
             ops_failed: AtomicU64::new(0),
             retries: AtomicU64::new(0),
@@ -77,6 +82,16 @@ impl TelemetryStats {
     pub fn record_deleted(&self, count: u64) {
         self.objects_deleted.fetch_add(count, Ordering::Relaxed);
         self.ops_succeeded.fetch_add(count, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_skipped(&self, count: u64) {
+        self.objects_skipped.fetch_add(count, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_resumed_bytes(&self, bytes: u64) {
+        self.resumed_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     #[inline]
@@ -104,16 +119,20 @@ impl TelemetryStats {
 
         StatsSnapshot {
             elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+            duration_secs: elapsed.as_secs_f64(),
             objects_transferred: self.objects_transferred.load(Ordering::Relaxed),
             objects_listed: self.objects_listed.load(Ordering::Relaxed),
             objects_deleted: self.objects_deleted.load(Ordering::Relaxed),
+            objects_skipped: self.objects_skipped.load(Ordering::Relaxed),
             parts_transferred: self.parts_transferred.load(Ordering::Relaxed),
             bytes_transferred: bytes,
+            resumed_bytes: self.resumed_bytes.load(Ordering::Relaxed),
             ops_succeeded: ops_ok,
             ops_failed: ops_err,
             retries: self.retries.load(Ordering::Relaxed),
             ops_per_sec: total_ops as f64 / secs,
             mib_per_sec: (bytes as f64 / (1024.0 * 1024.0)) / secs,
+            mb_per_sec: (bytes as f64 / 1_000_000.0) / secs,
         }
     }
 }
@@ -121,16 +140,28 @@ impl TelemetryStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsSnapshot {
     pub elapsed_ms: f64,
+    pub duration_secs: f64,
     pub objects_transferred: u64,
     pub objects_listed: u64,
     pub objects_deleted: u64,
+    pub objects_skipped: u64,
     pub parts_transferred: u64,
     pub bytes_transferred: u64,
+    pub resumed_bytes: u64,
     pub ops_succeeded: u64,
     pub ops_failed: u64,
     pub retries: u64,
     pub ops_per_sec: f64,
     pub mib_per_sec: f64,
+    pub mb_per_sec: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonStatsReport {
+    pub command: String,
+    pub exit_code: u8,
+    pub dry_run: bool,
+    pub stats: StatsSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +192,8 @@ pub struct StructuredEvent {
 pub struct OutputContext {
     pub json_mode: bool,
     pub stat_mode: bool,
+    pub json_stats: bool,
+    pub json_stats_file: Option<PathBuf>,
     pub dry_run: bool,
     pub show_progress: bool,
     pub quiet: bool,
@@ -191,6 +224,8 @@ impl OutputContext {
         Self {
             json_mode,
             stat_mode,
+            json_stats: false,
+            json_stats_file: None,
             dry_run,
             show_progress,
             quiet: false,
@@ -202,6 +237,12 @@ impl OutputContext {
 
     pub fn with_quiet(mut self, quiet: bool) -> Self {
         self.quiet = quiet;
+        self
+    }
+
+    pub fn with_json_stats(mut self, json_stats: bool, json_stats_file: Option<PathBuf>) -> Self {
+        self.json_stats = json_stats;
+        self.json_stats_file = json_stats_file;
         self
     }
 
@@ -332,6 +373,38 @@ impl OutputContext {
             );
         }
     }
+
+    pub fn emit_final_stats(&self, command_name: &str, exit_code: u8, stdout_is_stream: bool) {
+        self.print_stats();
+        if !self.json_stats && self.json_stats_file.is_none() {
+            return;
+        }
+        let report = JsonStatsReport {
+            command: command_name.to_string(),
+            exit_code,
+            dry_run: self.dry_run,
+            stats: self.stats.snapshot(),
+        };
+        if let Ok(json_line) = serde_json::to_string(&report) {
+            if let Some(ref path) = self.json_stats_file {
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+                let _ = std::fs::write(path, format!("{json_line}\n"));
+            }
+            if self.json_stats {
+                if stdout_is_stream {
+                    let mut err = io::stderr().lock();
+                    let _ = writeln!(err, "{json_line}");
+                } else {
+                    let mut out = io::stdout().lock();
+                    let _ = writeln!(out, "{json_line}");
+                }
+            }
+        }
+    }
 }
 
 pub fn format_bytes(bytes: u64, humanize: bool) -> String {
@@ -370,6 +443,8 @@ mod tests {
         stats.record_transfer(1024 * 1024, 2);
         stats.record_listed(15);
         stats.record_deleted(3);
+        stats.record_skipped(4);
+        stats.record_resumed_bytes(512 * 1024);
         stats.record_retry();
 
         let snap = stats.snapshot();
@@ -378,6 +453,8 @@ mod tests {
         assert_eq!(snap.parts_transferred, 2);
         assert_eq!(snap.objects_listed, 15);
         assert_eq!(snap.objects_deleted, 3);
+        assert_eq!(snap.objects_skipped, 4);
+        assert_eq!(snap.resumed_bytes, 512 * 1024);
         assert_eq!(snap.retries, 1);
         assert_eq!(snap.ops_succeeded, 4);
     }

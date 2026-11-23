@@ -1,7 +1,7 @@
 class T3 < Formula
   desc "t3 (Turbo 3): Blazing-fast parallel S3 client and drop-in s5cmd replacement in Rust"
   homepage "https://ehlerst.github.io/t3/"
-  version "0.1.3"
+  version "0.2.0"
   license any_of: ["Apache-2.0", "MIT"]
 
   on_macos do

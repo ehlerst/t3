@@ -673,6 +673,7 @@ impl S3Client {
         opts: &PutObjectOptions,
     ) -> Result<String, S3ClientError> {
         let mut headers = build_put_headers(opts);
+        apply_conditional_headers(&mut headers, opts);
         if opts.checksum_crc32c {
             let crc = crc32fast::hash(&body).to_be_bytes();
             let b64 = base64::engine::general_purpose::STANDARD.encode(crc);
@@ -703,6 +704,7 @@ impl S3Client {
         opts: &PutObjectOptions,
     ) -> Result<String, S3ClientError> {
         let mut headers = build_put_headers(opts);
+        apply_conditional_headers(&mut headers, opts);
         let encoded_src = format!(
             "/{}/{}",
             aws_uri_encode(src_bucket),
@@ -725,6 +727,11 @@ impl S3Client {
             if let Ok(val) = HeaderValue::from_str(dir) {
                 headers.insert("x-amz-metadata-directive", val);
             }
+        } else if !opts.metadata.is_empty() {
+            headers.insert(
+                "x-amz-metadata-directive",
+                HeaderValue::from_static("REPLACE"),
+            );
         }
 
         let (_, _, body) = self
@@ -794,12 +801,27 @@ impl S3Client {
         bucket: &str,
         key: &str,
         upload_id: &str,
+        parts: Vec<CompletedPartInfo>,
+    ) -> Result<String, S3ClientError> {
+        self.complete_multipart_upload_with_opts(bucket, key, upload_id, parts, None)
+            .await
+    }
+
+    pub async fn complete_multipart_upload_with_opts(
+        &self,
+        bucket: &str,
+        key: &str,
+        upload_id: &str,
         mut parts: Vec<CompletedPartInfo>,
+        opts: Option<&PutObjectOptions>,
     ) -> Result<String, S3ClientError> {
         parts.sort_by_key(|p| p.part_number);
         let xml_body = xml::serialize_complete_multipart_upload(&parts);
         let mut headers = HeaderMap::new();
         headers.insert("content-type", HeaderValue::from_static("application/xml"));
+        if let Some(o) = opts {
+            apply_conditional_headers(&mut headers, o);
+        }
         let (_, _, resp_body) = self
             .execute_raw(
                 Method::POST,
@@ -1011,6 +1033,30 @@ fn build_put_headers(opts: &PutObjectOptions) -> HeaderMap {
         }
     }
     headers
+}
+
+fn format_etag_header_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed == "*" || (trimmed.starts_with('"') && trimmed.ends_with('"')) {
+        trimmed.to_string()
+    } else {
+        format!("\"{trimmed}\"")
+    }
+}
+
+fn apply_conditional_headers(headers: &mut HeaderMap, opts: &PutObjectOptions) {
+    if let Some(ref im) = opts.if_match {
+        let formatted = format_etag_header_value(im);
+        if let Ok(v) = HeaderValue::from_str(&formatted) {
+            headers.insert("if-match", v);
+        }
+    }
+    if let Some(ref inm) = opts.if_none_match {
+        let formatted = format_etag_header_value(inm);
+        if let Ok(v) = HeaderValue::from_str(&formatted) {
+            headers.insert("if-none-match", v);
+        }
+    }
 }
 
 #[cfg(test)]

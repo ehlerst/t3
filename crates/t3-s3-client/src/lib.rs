@@ -6,6 +6,7 @@ pub mod xml;
 
 pub use auth::{AwsCredentials, ConfigOverrides, ResolvedConfig};
 pub use client::S3Client;
+pub use sigv4::SigV4Signer;
 pub use types::{
     BucketInfo, CompletedPartInfo, DeleteObjectsOutput, ListObjectsPage, ObjectHead, ObjectInfo,
     PutObjectOptions, S3ClientError,

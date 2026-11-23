@@ -1,7 +1,8 @@
-use crate::filter::GlobFilter;
+use crate::filter::{FilterError, GlobFilter};
 use crate::lister::{compute_rel_key, stream_matching_s3_objects, MatchedS3Object};
 use crate::select::SelectQuery;
-use crate::uri::{compute_destination_key, split_wildcard, StorageLocation};
+use crate::tar_stream::{tar_download_s3_to_dir, tar_upload_dir_to_s3, TarCompression};
+use crate::uri::{compute_destination_key, split_wildcard, StorageLocation, UriError};
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -12,19 +13,69 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use t3_s3_client::{CompletedPartInfo, ObjectInfo, PutObjectOptions, S3Client};
+use t3_s3_client::{CompletedPartInfo, ObjectInfo, PutObjectOptions, S3Client, S3ClientError};
 use t3_storage::{
-    read_file_bytes, safe_join, sanitize_relative_path, walk_local_files, BufferPool, DirCache,
-    PositionalReader, PreallocatedWriter,
+    compute_adaptive_part_size, read_file_bytes, safe_join, sanitize_relative_path,
+    walk_local_files, BufferPool, DirCache, PositionalReader, PreallocatedWriter, ResumeTracker,
+    StorageError,
 };
 use t3_telemetry::{format_bytes, OutputContext};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum T3ExitCode {
+    Success = 0,
+    GeneralError = 1,
+    UsageError = 2,
+    NotFound = 3,
+    PreconditionFailed = 4,
+}
+
+impl T3ExitCode {
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+pub fn classify_error_exit_code(err: &anyhow::Error) -> T3ExitCode {
+    for cause in err.chain() {
+        if let Some(s3_err) = cause.downcast_ref::<S3ClientError>() {
+            if s3_err.is_not_found() {
+                return T3ExitCode::NotFound;
+            }
+            if s3_err.is_precondition_failed() {
+                return T3ExitCode::PreconditionFailed;
+            }
+        }
+        if cause.downcast_ref::<FilterError>().is_some()
+            || cause.downcast_ref::<UriError>().is_some()
+        {
+            return T3ExitCode::UsageError;
+        }
+        if let Some(StorageError::Io { source, .. }) = cause.downcast_ref::<StorageError>() {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                return T3ExitCode::NotFound;
+            }
+        }
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::NotFound {
+                return T3ExitCode::NotFound;
+            }
+        }
+    }
+    T3ExitCode::GeneralError
+}
+
 #[derive(Debug, Clone)]
 pub struct CopyOptions {
     pub concurrency: usize,
     pub part_size_bytes: u64,
+    pub explicit_part_size: Option<u64>,
+    pub resume: bool,
+    pub tar_stream: bool,
+    pub compression: TarCompression,
     pub flatten: bool,
     pub no_clobber: bool,
     pub if_size_differ: bool,
@@ -40,11 +91,22 @@ pub struct CopyOptions {
     pub delete_source: bool,
 }
 
+impl CopyOptions {
+    #[inline]
+    pub fn effective_part_size(&self, total_size: u64) -> u64 {
+        compute_adaptive_part_size(total_size, self.explicit_part_size)
+    }
+}
+
 impl Default for CopyOptions {
     fn default() -> Self {
         Self {
             concurrency: 5,
-            part_size_bytes: 50 * 1024 * 1024,
+            part_size_bytes: 16 * 1024 * 1024,
+            explicit_part_size: None,
+            resume: false,
+            tar_stream: false,
+            compression: TarCompression::Auto,
             flatten: false,
             no_clobber: false,
             if_size_differ: false,
@@ -68,6 +130,7 @@ pub struct SyncOptions {
     pub delete: bool,
     pub size_only: bool,
     pub exact_timestamps: bool,
+    pub exclude_newer_than_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +148,7 @@ pub struct RmOptions {
     pub excludes: Vec<String>,
     pub version_id: Option<String>,
     pub all_versions: bool,
+    pub older_than_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -748,6 +812,9 @@ impl T3Engine {
 
     pub async fn rm(&self, targets: &[String], opts: &RmOptions) -> Result<()> {
         let mut set = JoinSet::new();
+        let cutoff = opts
+            .older_than_secs
+            .map(|s| Utc::now() - chrono::Duration::seconds(s as i64));
 
         for raw_target in targets {
             let loc = StorageLocation::parse(raw_target)?;
@@ -763,6 +830,13 @@ impl T3Engine {
                         let permit = self.worker_sem.clone().acquire_owned().await?;
                         set.spawn(async move {
                             let _p = permit;
+                            if let Some(cutoff_dt) = cutoff {
+                                let head = eng.s3.head_object(&b, &k, vid.as_deref()).await?;
+                                if head.last_modified.is_none_or(|lm| lm >= cutoff_dt) {
+                                    eng.output.stats.record_skipped(1);
+                                    return Ok::<(), anyhow::Error>(());
+                                }
+                            }
                             if !eng.output.dry_run {
                                 eng.s3.delete_object(&b, &k, vid.as_deref()).await?;
                             }
@@ -793,6 +867,12 @@ impl T3Engine {
                         let mut batch: Vec<(String, Option<String>)> = Vec::with_capacity(1000);
                         while let Some(res) = rx.recv().await {
                             let matched = res?;
+                            if let Some(cutoff_dt) = cutoff {
+                                if matched.info.last_modified.is_none_or(|lm| lm >= cutoff_dt) {
+                                    self.output.stats.record_skipped(1);
+                                    continue;
+                                }
+                            }
                             batch.push((matched.info.key, matched.info.version_id));
                             if batch.len() >= 1000 {
                                 let chunk = std::mem::replace(&mut batch, Vec::with_capacity(1000));
@@ -806,6 +886,16 @@ impl T3Engine {
                 }
                 StorageLocation::Local { path } => {
                     if path.is_file() {
+                        if let Some(cutoff_dt) = cutoff {
+                            let modified = fs::metadata(&path)?
+                                .modified()
+                                .ok()
+                                .map(DateTime::<Utc>::from);
+                            if modified.is_none_or(|lm| lm >= cutoff_dt) {
+                                self.output.stats.record_skipped(1);
+                                continue;
+                            }
+                        }
                         if !self.output.dry_run {
                             fs::remove_file(&path)?;
                         }
@@ -862,7 +952,107 @@ impl T3Engine {
         Ok(())
     }
 
+    pub async fn exists(&self, target: &str, version_id: Option<&str>) -> Result<bool> {
+        let loc = StorageLocation::parse(target)?;
+        match loc {
+            StorageLocation::S3 { bucket, key } => {
+                let res = if key.is_empty() {
+                    self.s3.head_bucket(&bucket).await.map(|_| ())
+                } else {
+                    self.s3
+                        .head_object(&bucket, &key, version_id)
+                        .await
+                        .map(|_| ())
+                };
+                match res {
+                    Ok(()) => {
+                        self.output.stats.record_op_success();
+                        if self.output.json_mode {
+                            println!(
+                                "{}",
+                                json!({
+                                    "operation": "exists",
+                                    "target": target,
+                                    "exists": true,
+                                })
+                            );
+                        }
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        if e.is_not_found() && self.output.json_mode {
+                            println!(
+                                "{}",
+                                json!({
+                                    "operation": "exists",
+                                    "target": target,
+                                    "exists": false,
+                                })
+                            );
+                        }
+                        Err(e.into())
+                    }
+                }
+            }
+            StorageLocation::Local { path } => {
+                if path.exists() {
+                    self.output.stats.record_op_success();
+                    Ok(true)
+                } else {
+                    Err(S3ClientError::NotFound(path.display().to_string()).into())
+                }
+            }
+        }
+    }
+
+    pub async fn tar_sync(&self, src: &str, dst: &str, opts: &CopyOptions) -> Result<()> {
+        let src_loc = StorageLocation::parse(src)?;
+        let dst_loc = StorageLocation::parse(dst)?;
+
+        match (src_loc, dst_loc) {
+            (
+                StorageLocation::Local { path: src_dir },
+                StorageLocation::S3 {
+                    bucket: dst_bucket,
+                    key: dst_key,
+                },
+            ) => {
+                if dst_key.is_empty() {
+                    bail!("tar-sync destination S3 URI must include an object key (e.g. s3://bucket/cache.tar.lz4)");
+                }
+                tar_upload_dir_to_s3(self, &src_dir, &dst_bucket, &dst_key, opts).await
+            }
+            (
+                StorageLocation::S3 {
+                    bucket: src_bucket,
+                    key: src_key,
+                },
+                StorageLocation::Local { path: dst_dir },
+            ) => {
+                if src_key.is_empty() {
+                    bail!("tar-sync source S3 URI must include an object key");
+                }
+                tar_download_s3_to_dir(self, &src_bucket, &src_key, &dst_dir, opts).await
+            }
+            _ => bail!(
+                "tar-sync requires one local directory and one S3 object URI (Local -> S3 or S3 -> Local)"
+            ),
+        }
+    }
+
     pub async fn cp(&self, src: &str, dst: &str, opts: &CopyOptions) -> Result<()> {
+        if opts.tar_stream {
+            return self.tar_sync(src, dst, opts).await;
+        }
+        if src == "-" {
+            return self.pipe(dst, opts).await;
+        }
+        if dst == "-" {
+            return self
+                .cat(&[src.to_string()], opts.version_id.as_deref())
+                .await;
+        }
+
         let src_loc = StorageLocation::parse(src)?;
         let dst_loc = StorageLocation::parse(dst)?;
         let op_label = if opts.delete_source { "mv" } else { "cp" };
@@ -995,7 +1185,7 @@ impl T3Engine {
             return Ok(());
         }
 
-        let part_size = opts.part_size_bytes.max(5 * 1024 * 1024);
+        let part_size = opts.effective_part_size(size);
         if size <= part_size {
             let body = read_file_bytes(local_path, size)
                 .with_context(|| format!("Failed to read {}", local_path.display()))?;
@@ -1051,7 +1241,13 @@ impl T3Engine {
                 }
             }
             self.s3
-                .complete_multipart_upload(bucket, key, &upload_id, completed)
+                .complete_multipart_upload_with_opts(
+                    bucket,
+                    key,
+                    &upload_id,
+                    completed,
+                    Some(&opts.put_opts),
+                )
                 .await?;
             self.output.stats.record_transfer(size, num_parts);
         }
@@ -1083,33 +1279,39 @@ impl T3Engine {
 
         // Fast path: single explicit object key (no glob, not ending with `/`)
         if !sp.has_glob && !src_key.is_empty() && !src_key.ends_with('/') {
-            if let Ok(head) = self
+            match self
                 .s3
                 .head_object(src_bucket, src_key, opts.version_id.as_deref())
                 .await
             {
-                let rel_name = src_key.rsplit('/').next().unwrap_or(src_key);
-                let final_dst = if dst_is_dir {
-                    safe_join(dst_path, rel_name)?
-                } else {
-                    if let Some(rel) = dst_path.to_str() {
-                        if rel.contains("..") {
-                            let _ = sanitize_relative_path(rel)?;
+                Ok(head) => {
+                    let rel_name = src_key.rsplit('/').next().unwrap_or(src_key);
+                    let final_dst = if dst_is_dir {
+                        safe_join(dst_path, rel_name)?
+                    } else {
+                        if let Some(rel) = dst_path.to_str() {
+                            if rel.contains("..") {
+                                let _ = sanitize_relative_path(rel)?;
+                            }
                         }
-                    }
-                    dst_path.to_path_buf()
-                };
-                return self
-                    .download_single_object(
-                        src_bucket,
-                        src_key,
-                        head.content_length,
-                        head.last_modified,
-                        &final_dst,
-                        opts,
-                        op_label,
-                    )
-                    .await;
+                        dst_path.to_path_buf()
+                    };
+                    return self
+                        .download_single_object(
+                            src_bucket,
+                            src_key,
+                            head.content_length,
+                            head.last_modified,
+                            &final_dst,
+                            opts,
+                            op_label,
+                        )
+                        .await;
+                }
+                Err(e) if !e.is_not_found() => {
+                    return Err(e.into());
+                }
+                Err(_) => {}
             }
         }
 
@@ -1128,8 +1330,10 @@ impl T3Engine {
         });
 
         let mut set = JoinSet::new();
+        let mut matched_any = false;
         while let Some(res) = rx.recv().await {
             let matched = res?;
+            matched_any = true;
             let rel_for_dst = if opts.flatten {
                 matched
                     .rel_key
@@ -1166,7 +1370,11 @@ impl T3Engine {
             });
         }
 
-        collect_join_set(&mut set).await
+        collect_join_set(&mut set).await?;
+        if !matched_any && !sp.has_glob && !src_key.is_empty() {
+            return Err(S3ClientError::NotFound(format!("s3://{src_bucket}/{src_key}")).into());
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1196,14 +1404,65 @@ impl T3Engine {
             return Ok(());
         }
 
-        let part_size = opts.part_size_bytes.max(5 * 1024 * 1024);
-        if size <= part_size || opts.concurrency <= 1 {
+        let part_size = opts.effective_part_size(size);
+        if (size <= part_size || opts.concurrency <= 1) && !opts.resume {
             self.dir_cache.ensure_parent(dst_file)?;
             let n = self
                 .s3
                 .download_object_to_file(bucket, key, opts.version_id.as_deref(), dst_file, size)
                 .await?;
             self.output.stats.record_transfer(n, 1);
+        } else if opts.resume {
+            let (tracker, was_resumed) =
+                ResumeTracker::load_or_init(dst_file, None, size, part_size, true);
+            let writer = PreallocatedWriter::open_existing_or_create(
+                &tracker.part_file_path,
+                size,
+                &self.dir_cache,
+                !was_resumed,
+            )?;
+            let num_parts = size.div_ceil(part_size).max(1);
+            let part_sem = Arc::new(Semaphore::new(opts.concurrency.max(1)));
+            let mut part_set = JoinSet::new();
+            let mut fetched_bytes = 0u64;
+            let mut fetched_parts = 0u64;
+
+            for part_idx in 0..num_parts {
+                let start = part_idx * part_size;
+                let end = (start + part_size - 1).min(size.saturating_sub(1));
+                let chunk_len = if size == 0 { 0 } else { end - start + 1 };
+
+                if tracker.is_part_completed(part_idx) {
+                    self.output.stats.record_resumed_bytes(chunk_len);
+                    continue;
+                }
+                fetched_bytes += chunk_len;
+                fetched_parts += 1;
+
+                let permit = part_sem.clone().acquire_owned().await?;
+                let c = self.s3.clone();
+                let b = bucket.to_string();
+                let k = key.to_string();
+                let vid = opts.version_id.clone();
+                let w = writer.clone();
+                let tr = tracker.clone();
+
+                part_set.spawn(async move {
+                    let _p = permit;
+                    let range = if size > 0 { Some((start, end)) } else { None };
+                    let chunk = c.get_object_bytes(&b, &k, range, vid.as_deref()).await?;
+                    w.write_at(start, &chunk)?;
+                    tr.mark_part_completed(part_idx)?;
+                    Ok::<(), anyhow::Error>(())
+                });
+            }
+
+            collect_join_set(&mut part_set).await?;
+            drop(writer);
+            tracker.finalize(dst_file)?;
+            self.output
+                .stats
+                .record_transfer(fetched_bytes, fetched_parts);
         } else {
             let writer = PreallocatedWriter::create(dst_file, size, &self.dir_cache)?;
             let num_parts = size.div_ceil(part_size);
@@ -1350,7 +1609,7 @@ impl T3Engine {
             return Ok(());
         }
 
-        let part_size = opts.part_size_bytes.max(5 * 1024 * 1024);
+        let part_size = opts.effective_part_size(size);
         let cross_region = opts.source_region.is_some()
             && opts.destination_region.is_some()
             && opts.source_region != opts.destination_region;
@@ -1417,7 +1676,13 @@ impl T3Engine {
                 }
             }
             self.s3
-                .complete_multipart_upload(dst_bucket, dst_key, &upload_id, completed)
+                .complete_multipart_upload_with_opts(
+                    dst_bucket,
+                    dst_key,
+                    &upload_id,
+                    completed,
+                    Some(&opts.put_opts),
+                )
                 .await?;
             self.output.stats.record_transfer(size, num_parts);
         }
@@ -1651,12 +1916,21 @@ impl T3Engine {
         }
 
         if opts.delete {
+            let protect_newer_cutoff = opts
+                .exclude_newer_than_secs
+                .map(|s| Utc::now() - chrono::Duration::seconds(s as i64));
             let mut s3_delete_batch: Vec<(String, Option<String>)> = Vec::new();
             let mut dst_s3_bucket = String::new();
 
             for (rel_key, dst_item) in dst_map {
                 if seen_rel_keys.contains_key(&rel_key) {
                     continue;
+                }
+                if let Some(cutoff_dt) = protect_newer_cutoff {
+                    if dst_item.modified.is_some_and(|lm| lm > cutoff_dt) {
+                        self.output.stats.record_skipped(1);
+                        continue;
+                    }
                 }
                 match dst_item.origin {
                     SyncOrigin::S3 { bucket, key } => {
@@ -1823,17 +2097,36 @@ async fn collect_join_set(set: &mut JoinSet<Result<()>>) -> Result<()> {
 
 pub fn parse_duration_secs(s: &str) -> Result<u64> {
     let trimmed = s.trim();
+    if trimmed.is_empty() {
+        bail!("Empty duration string");
+    }
     if let Ok(sec) = trimmed.parse::<u64>() {
         return Ok(sec);
     }
-    if let Some(h) = trimmed.strip_suffix('h') {
-        return Ok(h.parse::<u64>()? * 3600);
+    let mut total_secs = 0u64;
+    let mut num_buf = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            num_buf.push(ch);
+        } else {
+            if num_buf.is_empty() {
+                bail!("Invalid duration '{s}' (examples: 3600, 7d, 24h, 30m, 90s)");
+            }
+            let val: u64 = num_buf.parse()?;
+            num_buf.clear();
+            let mult = match ch {
+                'w' | 'W' => 7 * 86400,
+                'd' | 'D' => 86400,
+                'h' | 'H' => 3600,
+                'm' | 'M' => 60,
+                's' | 'S' => 1,
+                _ => bail!("Invalid duration unit '{ch}' in '{s}' (supported: w, d, h, m, s)"),
+            };
+            total_secs = total_secs.saturating_add(val.saturating_mul(mult));
+        }
     }
-    if let Some(m) = trimmed.strip_suffix('m') {
-        return Ok(m.parse::<u64>()? * 60);
+    if !num_buf.is_empty() {
+        bail!("Missing duration unit at end of '{s}' (supported: w, d, h, m, s)");
     }
-    if let Some(sec) = trimmed.strip_suffix('s') {
-        return Ok(sec.parse::<u64>()?);
-    }
-    bail!("Invalid duration '{s}' (examples: 3600, 1h, 30m, 90s)")
+    Ok(total_secs)
 }

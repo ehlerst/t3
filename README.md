@@ -83,27 +83,51 @@ Automated benchmark rating measured via [`crates/t3-benchmarks/`](crates/t3-benc
 
 ---
 
-## 📦 Complete `s5cmd` Feature & Subcommand Support (15 Subcommands)
+## 🗜️ `v0.2.0` Tar-Stream Compression Suite Benchmark (`t3 tar-sync` / `cp --tar-stream`)
 
-`t3` supports `s5cmd`'s exact CLI syntax (global flags before or after the subcommand):
+Measured across a 500-file Buildx/CI cache dataset (**65.13 MiB** raw: 200 OCI JSON manifests, 150 IR/symbol cache files, 150 binary layer blobs):
+
+| Codec | Save (`Tar+Comp`) | Restore (`Decomp+Untar`) | Local S3 Round-Trip | 1 Gbps Cloud S3 Round-Trip | Compressed Size (Ratio) |
+|:---|---:|---:|---:|---:|---:|
+| **`lz4` (`lz4_flex`, default)** | **50.2 ms (`1,298.2 MiB/s`)** | **37.7 ms (`1,729.8 MiB/s`)** | **107.6 ms** | **390.5 ms** | 18.94 MiB (`3.44x`) |
+| **`zstd-1` (`zstd` L1)** | **79.8 ms (`816.6 MiB/s`)** | **47.4 ms (`1,374.9 MiB/s`)** | 144.9 ms | **392.8 ms** | **16.60 MiB (`3.92x`)** |
+| **`zstd-3` (`zstd` L3)** | 108.9 ms (`598.2 MiB/s`) | 43.9 ms (`1,485.2 MiB/s`) | 167.8 ms | 406.4 ms | **15.85 MiB (`4.11x`)** |
+| **`none` (`.tar`)** | 30.0 ms (`2,169.4 MiB/s`) | 30.3 ms (`2,152.2 MiB/s`) | 161.5 ms | 1,158.9 ms | 65.43 MiB (`1.00x`) |
+| **`gzip-1` (`flate2` fast)** | 160.6 ms (`405.7 MiB/s`) | 93.8 ms (`694.6 MiB/s`) | 271.7 ms | 539.8 ms | 17.68 MiB (`3.68x`) |
+| **`gzip-6` (`flate2` default)** | 1,384.8 ms (`47.0 MiB/s`) | 92.8 ms (`701.6 MiB/s`) | 1,494.3 ms | 1,743.6 ms | 16.66 MiB (`3.91x`) |
+
+---
+
+## 📦 Complete `s5cmd` Feature & Subcommand Support (17 Subcommands)
+
+`t3` supports `s5cmd`'s exact CLI syntax plus high-speed `v0.2.0` CI/cache extensions (`--json-stats`, `--json-stats-file`, `--retry-limit`):
 
 1. **`cp [options] <src> <dst>`**:
-   - Directions: `Local → S3`, `S3 → Local`, `S3 → S3` (including > 5 GiB parallel multipart copy), `Local → Local`.
-   - Flags: `-c/--concurrency` (default 5), `-p/--part-size` (default 50 MiB), `-f/--flatten`, `-n/--no-clobber`, `-s/--if-size-differ`, `-u/--if-source-newer`, `-sp/--show-progress`, `--exclude`, `--include`, `--raw`, `--no-follow-symlinks`, `--storage-class`, `--sse`, `--sse-kms-key-id`, `--acl`, `--cache-control`, `--expires`, `--content-type`, `--content-encoding`, `--content-disposition`, `--metadata Key=Value`, `--metadata-directive`, `--source-region`, `--destination-region`, `--version-id`.
-2. **`mv [options] <src> <dst>`**: Parallel copy followed by source deletion.
-3. **`sync [options] <src> <dst>`**: Concurrent source & destination listing + streaming diff with `--delete` (respecting `--exclude`/`--include`), `--size-only`, and `--exact-timestamps`.
-4. **`ls [options] [target]`**: Lists buckets or objects/prefixes (`-e/--etag`, `-H/--humanize`, `-s/--show-fullpath`, `--all-versions`).
-5. **`rm [options] <target>...`**: Pipelined 1,000-key `DeleteObjects` batcher across wildcards (`--raw`, `--exclude`, `--include`, `--version-id`, `--all-versions`).
-6. **`run [file]`**: **"Beast Mode"** — parses batch commands from a file or `stdin` and executes them concurrently on the shared 256-worker pool.
-7. **`cat <s3-url>...`**: Streams one or more S3 objects (including wildcards) to `stdout`.
-8. **`pipe [options] <s3-url>`**: Streams `stdin` directly to an S3 object via bounded-memory parallel multipart upload.
-9. **`head <s3-url>`**: Prints `HeadBucket` or `HeadObject` metadata.
-10. **`du [options] <s3-url>`**: Summarizes object bytes and counts (`-g/--group` by storage class, `-H/--humanize`).
-11. **`mb <s3://bucket>`** & **`rb [--force] <s3://bucket>`**: Create or remove buckets (`--force` empties the bucket first).
-12. **`presign [-e <duration>] <s3-url>`**: Generates a SigV4 presigned `GET` URL.
-13. **`select -q <sql> <s3-url>`**: Executes SQL queries across JSON/NDJSON or CSV objects (supports wildcards).
-14. **`bucket-version [--set Enabled|Suspended] <s3://bucket>`**: Gets or sets bucket versioning.
-15. **`version`**: Prints version and build metadata.
+   - Directions: `Local → S3`, `S3 → Local`, `S3 → S3` (including > 5 GiB parallel multipart copy), `Local → Local`, plus streaming `stdin`/`stdout` (`t3 cp - s3://bucket/key` and `t3 cp s3://bucket/key -`).
+   - Flags: `-c/--concurrency` (default 5), `-p/--part-size` (adaptive by file size when omitted; $\le 16\text{ MiB}$ uses single-PUT fast path), `-C/--continue` (`--resume` via `.t3part` range tracking), `--tar-stream`, `--compression auto|lz4|zstd|gzip|none`, `--if-match <etag>`, `--if-none-match <etag|*>`, `-f/--flatten`, `-n/--no-clobber`, `-s/--if-size-differ`, `-u/--if-source-newer`, `-sp/--show-progress`, `--exclude`, `--include`, `--raw`, `--no-follow-symlinks`, `--storage-class`, `--sse`, `--sse-kms-key-id`, `--acl`, `--cache-control`, `--expires`, `--content-type`, `--content-encoding`, `--content-disposition`, `--metadata Key=Value`, `--metadata-directive`, `--source-region`, `--destination-region`, `--version-id`.
+2. **`tar-sync [options] <src> <dst>`**: Packs a local directory tree into a single compressed S3 tar object (`.tar.lz4`, `.tar.zst`, `.tar.gz`, `.tar`) or restores a single S3 tar archive directly into a local directory with automatic magic-byte codec detection and path-traversal protection.
+3. **`exists [--version-id <id>] <s3://bucket[/key]>`**: Fast `HEAD`-based existence check returning stable exit code `0` if found and exit code `3` if not found (`404`).
+4. **`mv [options] <src> <dst>`**: Parallel copy followed by source deletion.
+5. **`sync [options] <src> <dst>`**: Concurrent source & destination listing + streaming diff with `--delete` (respecting `--exclude`/`--include`), `--exclude-newer-than <duration>` (protects recent staging objects during `--delete`), `--size-only`, and `--exact-timestamps`.
+6. **`ls [options] [target]`**: Lists buckets or objects/prefixes (`-e/--etag`, `-H/--humanize`, `-s/--show-fullpath`, `--all-versions`).
+7. **`rm [options] <target>...`**: Pipelined 1,000-key `DeleteObjects` batcher across wildcards (`--older-than <duration>`, `--raw`, `--exclude`, `--include`, `--version-id`, `--all-versions`).
+8. **`run [file]`**: **"Beast Mode"** — parses batch commands from a file or `stdin` and executes them concurrently on the shared 256-worker pool.
+9. **`cat <s3-url>...`**: Streams one or more S3 objects (including wildcards) to `stdout`.
+10. **`pipe [options] <s3-url>`**: Streams `stdin` directly to an S3 object via bounded-memory parallel multipart upload.
+11. **`head <s3-url>`**: Prints `HeadBucket` or `HeadObject` metadata.
+12. **`du [options] <s3-url>`**: Summarizes object bytes and counts (`-g/--group` by storage class, `-H/--humanize`).
+13. **`mb <s3://bucket>`** & **`rb [--force] <s3://bucket>`**: Create or remove buckets (`--force` empties the bucket first).
+14. **`presign [-e <duration>] <s3-url>`**: Generates a SigV4 presigned `GET` URL.
+15. **`select -q <sql> <s3-url>`**: Executes SQL queries across JSON/NDJSON or CSV objects (supports wildcards).
+16. **`bucket-version [--set Enabled|Suspended] <s3://bucket>`**: Gets or sets bucket versioning.
+17. **`version`**: Prints version and build metadata.
+
+### Stable Exit Codes
+- `0`: Success
+- `1`: General S3 / transport / runtime error
+- `2`: CLI usage / invalid argument error
+- `3`: Not Found (`404 NoSuchKey` / `NoSuchBucket` / cache miss)
+- `4`: Precondition Failed (`412 PreconditionFailed` / `409 ConditionalRequestConflict` on `--if-match` / `--if-none-match` CAS writes)
 
 ---
 

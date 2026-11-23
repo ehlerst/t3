@@ -74,7 +74,13 @@ impl SigV4Signer {
             .iter()
             .filter_map(|(k, v)| {
                 let name = k.as_str();
-                if name == "host" || name.starts_with("x-amz-") || name == "content-type" {
+                if name == "host"
+                    || name.starts_with("x-amz-")
+                    || name == "content-type"
+                    || name == "content-md5"
+                    || name == "if-match"
+                    || name == "if-none-match"
+                {
                     v.to_str().ok().map(|s| (name, s.trim().to_string()))
                 } else {
                     None
@@ -175,6 +181,100 @@ impl SigV4Signer {
         url.query_pairs_mut()
             .append_pair("X-Amz-Signature", &signature);
         url.to_string()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_request_signature(
+        &self,
+        method: &str,
+        uri_path: &str,
+        raw_query: Option<&str>,
+        headers: &HeaderMap,
+        body: &[u8],
+        creds: &AwsCredentials,
+        region: &str,
+    ) -> Result<(), String> {
+        let auth_val = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "Missing Authorization header".to_string())?;
+        let rest = auth_val
+            .strip_prefix("AWS4-HMAC-SHA256 ")
+            .ok_or_else(|| "Unsupported Authorization scheme".to_string())?;
+
+        let mut cred_part = None;
+        let mut signed_headers_part = None;
+        let mut sig_part = None;
+        for part in rest.split(',') {
+            let p = part.trim();
+            if let Some(v) = p.strip_prefix("Credential=") {
+                cred_part = Some(v);
+            } else if let Some(v) = p.strip_prefix("SignedHeaders=") {
+                signed_headers_part = Some(v);
+            } else if let Some(v) = p.strip_prefix("Signature=") {
+                sig_part = Some(v);
+            }
+        }
+
+        let cred_str = cred_part.ok_or_else(|| "Missing Credential".to_string())?;
+        let signed_headers_str =
+            signed_headers_part.ok_or_else(|| "Missing SignedHeaders".to_string())?;
+        let expected_sig = sig_part.ok_or_else(|| "Missing Signature".to_string())?;
+
+        let amz_date = headers
+            .get("x-amz-date")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "Missing x-amz-date header".to_string())?;
+        let payload_hash = headers
+            .get("x-amz-content-sha256")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "Missing x-amz-content-sha256 header".to_string())?;
+
+        if payload_hash != "UNSIGNED-PAYLOAD" {
+            let actual_hash = sha256_hex(body);
+            if payload_hash != actual_hash {
+                return Err(format!(
+                    "x-amz-content-sha256 mismatch: header={payload_hash}, actual={actual_hash}"
+                ));
+            }
+        }
+
+        let date_stamp = amz_date
+            .get(..8)
+            .ok_or_else(|| "Invalid x-amz-date".to_string())?;
+        let expected_scope = format!("{date_stamp}/{region}/s3/aws4_request");
+        let expected_cred = format!("{}/{expected_scope}", creds.access_key_id);
+        if cred_str != expected_cred {
+            return Err(format!(
+                "Credential scope mismatch: got={cred_str}, expected={expected_cred}"
+            ));
+        }
+
+        let mut canonical_headers = String::new();
+        for h_name in signed_headers_str.split(';') {
+            let val = headers
+                .get(h_name)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| format!("Missing signed header '{h_name}'"))?;
+            canonical_headers.push_str(&format!("{}:{}\n", h_name, val.trim()));
+        }
+
+        let canonical_uri = if uri_path.is_empty() { "/" } else { uri_path };
+        let canonical_query = canonicalize_query(raw_query);
+        let canonical_request = format!(
+            "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
+        );
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{expected_scope}\n{}",
+            sha256_hex(canonical_request.as_bytes())
+        );
+        let signing_key = self.derive_signing_key(&creds.secret_access_key, date_stamp, region);
+        let computed_sig = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+
+        if computed_sig != expected_sig {
+            return Err("SignatureDoesNotMatch".to_string());
+        }
+        Ok(())
     }
 }
 

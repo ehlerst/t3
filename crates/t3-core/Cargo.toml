@@ -22,12 +22,18 @@ regex.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 walkdir.workspace = true
+tar.workspace = true
+flate2.workspace = true
+lz4_flex.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 criterion.workspace = true
 axum.workspace = true
 http.workspace = true
+md-5.workspace = true
+base64.workspace = true
 
 [[bench]]
 name = "t3_bench"

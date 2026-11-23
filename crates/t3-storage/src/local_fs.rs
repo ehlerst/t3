@@ -98,21 +98,33 @@ impl PreallocatedWriter {
         total_size: u64,
         dir_cache: &DirCache,
     ) -> Result<Self, StorageError> {
+        Self::open_existing_or_create(path, total_size, dir_cache, true)
+    }
+
+    pub fn open_existing_or_create(
+        path: &Path,
+        total_size: u64,
+        dir_cache: &DirCache,
+        truncate: bool,
+    ) -> Result<Self, StorageError> {
         dir_cache.ensure_parent(path)?;
         let file = OpenOptions::new()
             .create(true)
             .write(true)
-            .truncate(true)
+            .truncate(truncate)
             .open(path)
             .map_err(|e| StorageError::Io {
                 path: path.display().to_string(),
                 source: e,
             })?;
         if total_size > 0 {
-            file.set_len(total_size).map_err(|e| StorageError::Io {
-                path: path.display().to_string(),
-                source: e,
-            })?;
+            let cur_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            if truncate || cur_len != total_size {
+                file.set_len(total_size).map_err(|e| StorageError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
+            }
         }
         Ok(Self {
             file: Arc::new(file),
@@ -128,6 +140,142 @@ impl PreallocatedWriter {
                 path: self.path.display().to_string(),
                 source: e,
             })
+    }
+}
+
+pub const MIN_S3_PART_SIZE: u64 = 5 * 1024 * 1024;
+pub const DEFAULT_SINGLE_PUT_THRESHOLD: u64 = 16 * 1024 * 1024;
+pub const MAX_S3_PARTS: u64 = 10_000;
+
+/// Adaptive part sizing by object size:
+/// - Files <= 16 MiB take the single-PUT / single-GET fast path (returns 16 MiB threshold).
+/// - Larger files scale from 16 MiB -> 32 MiB -> 64 MiB -> 128+ MiB while keeping part count <= 10,000.
+pub fn compute_adaptive_part_size(total_size: u64, explicit_part_size_bytes: Option<u64>) -> u64 {
+    if let Some(exp) = explicit_part_size_bytes {
+        let base = exp.max(MIN_S3_PART_SIZE);
+        let min_for_limit = total_size
+            .div_ceil(MAX_S3_PARTS - 100)
+            .max(MIN_S3_PART_SIZE);
+        return base.max(min_for_limit.div_ceil(1024 * 1024) * 1024 * 1024);
+    }
+
+    if total_size <= DEFAULT_SINGLE_PUT_THRESHOLD {
+        return DEFAULT_SINGLE_PUT_THRESHOLD;
+    }
+    let tier_size = if total_size <= 128 * 1024 * 1024 {
+        16 * 1024 * 1024
+    } else if total_size <= 1024 * 1024 * 1024 {
+        32 * 1024 * 1024
+    } else if total_size <= 8 * 1024 * 1024 * 1024 {
+        64 * 1024 * 1024
+    } else {
+        128 * 1024 * 1024
+    };
+    let min_for_limit = total_size
+        .div_ceil(MAX_S3_PARTS - 100)
+        .max(MIN_S3_PART_SIZE);
+    tier_size.max(min_for_limit.div_ceil(1024 * 1024) * 1024 * 1024)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PartResumeMeta {
+    pub etag: Option<String>,
+    pub total_size: u64,
+    pub part_size: u64,
+    pub completed_parts: std::collections::BTreeSet<u64>,
+}
+
+#[derive(Clone)]
+pub struct ResumeTracker {
+    pub part_file_path: PathBuf,
+    pub meta_file_path: PathBuf,
+    meta: Arc<parking_lot::Mutex<PartResumeMeta>>,
+}
+
+impl ResumeTracker {
+    pub fn part_paths_for(dst_file: &Path) -> (PathBuf, PathBuf) {
+        let mut part_os = dst_file.as_os_str().to_os_string();
+        part_os.push(".t3part");
+        let mut meta_os = dst_file.as_os_str().to_os_string();
+        meta_os.push(".t3part.meta");
+        (PathBuf::from(part_os), PathBuf::from(meta_os))
+    }
+
+    pub fn load_or_init(
+        dst_file: &Path,
+        etag: Option<String>,
+        total_size: u64,
+        part_size: u64,
+        resume_enabled: bool,
+    ) -> (Self, bool) {
+        let (part_file_path, meta_file_path) = Self::part_paths_for(dst_file);
+        if resume_enabled {
+            if let (Ok(file_meta), Ok(meta_bytes)) =
+                (fs::metadata(&part_file_path), fs::read(&meta_file_path))
+            {
+                if file_meta.len() == total_size {
+                    if let Ok(saved) = serde_json::from_slice::<PartResumeMeta>(&meta_bytes) {
+                        let etag_matches = match (&saved.etag, &etag) {
+                            (Some(a), Some(b)) => a == b,
+                            _ => true,
+                        };
+                        if saved.total_size == total_size
+                            && saved.part_size == part_size
+                            && etag_matches
+                        {
+                            return (
+                                Self {
+                                    part_file_path,
+                                    meta_file_path,
+                                    meta: Arc::new(parking_lot::Mutex::new(saved)),
+                                },
+                                true,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let fresh = PartResumeMeta {
+            etag,
+            total_size,
+            part_size,
+            completed_parts: std::collections::BTreeSet::new(),
+        };
+        (
+            Self {
+                part_file_path,
+                meta_file_path,
+                meta: Arc::new(parking_lot::Mutex::new(fresh)),
+            },
+            false,
+        )
+    }
+
+    pub fn is_part_completed(&self, part_idx: u64) -> bool {
+        self.meta.lock().completed_parts.contains(&part_idx)
+    }
+
+    pub fn mark_part_completed(&self, part_idx: u64) -> Result<(), StorageError> {
+        let json_bytes = {
+            let mut guard = self.meta.lock();
+            guard.completed_parts.insert(part_idx);
+            serde_json::to_vec(&*guard).unwrap_or_default()
+        };
+        fs::write(&self.meta_file_path, json_bytes).map_err(|e| StorageError::Io {
+            path: self.meta_file_path.display().to_string(),
+            source: e,
+        })
+    }
+
+    pub fn finalize(&self, dst_file: &Path) -> Result<(), StorageError> {
+        fs::rename(&self.part_file_path, dst_file).map_err(|e| StorageError::Io {
+            path: dst_file.display().to_string(),
+            source: e,
+        })?;
+        let _ = fs::remove_file(&self.meta_file_path);
+        Ok(())
     }
 }
 

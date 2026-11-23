@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum FilterError {
     #[error("Invalid glob pattern '{0}': {1}")]
     InvalidGlob(String, String),
+    #[error("Invalid CLI argument: {0}")]
+    InvalidPattern(String),
 }
 
 /// High-speed DFA glob matcher using compiled `RegexSet`s.

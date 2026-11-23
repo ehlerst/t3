@@ -30,10 +30,26 @@ impl S3ClientError {
         match self {
             S3ClientError::Transport(_) => true,
             S3ClientError::Service { status, code, .. } => {
-                matches!(*status, 429 | 500 | 502 | 503 | 504)
-                    || code == "SlowDown"
-                    || code == "InternalError"
-                    || code == "RequestTimeout"
+                // Never retry hard 4xx client errors (400, 403, 404, 409, 411, 412, 416)
+                if matches!(*status, 400 | 403 | 404 | 405 | 409 | 411 | 412 | 416)
+                    && !matches!(
+                        code.as_str(),
+                        "RequestTimeout" | "SlowDown" | "Throttling" | "ThrottlingException"
+                    )
+                {
+                    return false;
+                }
+                matches!(*status, 408 | 429 | 500 | 502 | 503 | 504)
+                    || matches!(
+                        code.as_str(),
+                        "SlowDown"
+                            | "InternalError"
+                            | "RequestTimeout"
+                            | "ServiceUnavailable"
+                            | "Throttling"
+                            | "ThrottlingException"
+                            | "RequestTimeTooSkewed"
+                    )
             }
             _ => false,
         }
@@ -47,6 +63,18 @@ impl S3ClientError {
                     || code == "NoSuchKey"
                     || code == "NoSuchBucket"
                     || code == "NotFound"
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_precondition_failed(&self) -> bool {
+        match self {
+            S3ClientError::Service { status, code, .. } => {
+                *status == 412
+                    || (*status == 409 && code == "ConditionalRequestConflict")
+                    || code == "PreconditionFailed"
+                    || code == "ConditionalRequestConflict"
             }
             _ => false,
         }
@@ -108,6 +136,8 @@ pub struct PutObjectOptions {
     pub metadata: HashMap<String, String>,
     pub metadata_directive: Option<String>,
     pub checksum_crc32c: bool,
+    pub if_match: Option<String>,
+    pub if_none_match: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
