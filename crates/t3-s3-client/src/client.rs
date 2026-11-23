@@ -38,6 +38,7 @@ impl S3Client {
         let large_inflight = (config.endpoints.len().max(1) * 6).clamp(6, 32);
         let http = reqwest::Client::builder()
             .tcp_nodelay(true)
+            .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(max_inflight)
             .pool_idle_timeout(Duration::from_secs(90))
             .danger_accept_invalid_certs(config.no_verify_ssl)
@@ -132,10 +133,20 @@ impl S3Client {
     ) -> Result<(u16, HeaderMap, Bytes), S3ClientError> {
         let max_retries = self.config.retry_count;
         let mut attempt = 0u32;
+        let mut override_url: Option<Url> = None;
+        let mut active_region = self.config.region.clone();
+        let mut redirect_count = 0u32;
 
         loop {
-            let url = self.build_url(bucket, key, query)?;
+            let url = match override_url.clone() {
+                Some(u) => u,
+                None => self.build_url(bucket, key, query)?,
+            };
             let mut headers = extra_headers.clone();
+
+            if method == Method::PUT || method == Method::POST || !body.is_empty() {
+                headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+            }
 
             if let Some(ref payer) = self.config.request_payer {
                 if let Ok(val) = HeaderValue::from_str(payer) {
@@ -159,7 +170,7 @@ impl S3Client {
                         &mut headers,
                         &payload_hash,
                         creds,
-                        &self.config.region,
+                        &active_region,
                         Utc::now(),
                     );
                 }
@@ -167,9 +178,9 @@ impl S3Client {
 
             let req = self
                 .http
-                .request(method.clone(), url)
-                .headers(headers)
-                .body(body.clone());
+                .request(method.clone(), url.clone())
+                .body(body.clone())
+                .headers(headers);
 
             let _http_permit = self.http_sem.acquire().await.unwrap();
             match req.send().await {
@@ -183,6 +194,31 @@ impl S3Client {
 
                     if (200..300).contains(&status) {
                         return Ok((status, resp_headers, resp_bytes));
+                    }
+
+                    if matches!(status, 301 | 302 | 307 | 308) && redirect_count < 5 {
+                        redirect_count += 1;
+                        let new_region = resp_headers
+                            .get("x-amz-bucket-region")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        if let Some(ref reg) = new_region {
+                            active_region = reg.clone();
+                        }
+                        if let Some(loc) = resp_headers
+                            .get(http::header::LOCATION)
+                            .and_then(|v| v.to_str().ok())
+                        {
+                            if let Ok(new_url) = Url::parse(loc) {
+                                override_url = Some(new_url);
+                                continue;
+                            }
+                        } else if let Some(ref reg) = new_region {
+                            let mut redirected = url.clone();
+                            let _ = redirected.set_host(Some(&format!("s3.{reg}.amazonaws.com")));
+                            override_url = Some(redirected);
+                            continue;
+                        }
                     }
 
                     let err = if status == 404 && resp_bytes.is_empty() {
@@ -499,9 +535,15 @@ impl S3Client {
 
         let max_retries = self.config.retry_count;
         let mut attempt = 0u32;
+        let mut override_url: Option<Url> = None;
+        let mut active_region = self.config.region.clone();
+        let mut redirect_count = 0u32;
 
         loop {
-            let url = self.build_url(Some(bucket), Some(key), &query)?;
+            let url = match override_url.clone() {
+                Some(u) => u,
+                None => self.build_url(Some(bucket), Some(key), &query)?,
+            };
             let mut headers = HeaderMap::new();
 
             if let Some(ref payer) = self.config.request_payer {
@@ -523,13 +565,13 @@ impl S3Client {
                         &mut headers,
                         payload_hash,
                         creds,
-                        &self.config.region,
+                        &active_region,
                         Utc::now(),
                     );
                 }
             }
 
-            let req = self.http.request(Method::GET, url).headers(headers);
+            let req = self.http.request(Method::GET, url.clone()).headers(headers);
             let sem = if _size_hint >= 1024 * 1024 {
                 &self.large_sem
             } else {
@@ -556,6 +598,33 @@ impl S3Client {
                         }
                         drop(_http_permit);
                         return Ok(total);
+                    }
+
+                    if matches!(status, 301 | 302 | 307 | 308) && redirect_count < 5 {
+                        redirect_count += 1;
+                        let new_region = resp
+                            .headers()
+                            .get("x-amz-bucket-region")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        if let Some(ref reg) = new_region {
+                            active_region = reg.clone();
+                        }
+                        if let Some(loc) = resp
+                            .headers()
+                            .get(http::header::LOCATION)
+                            .and_then(|v| v.to_str().ok())
+                        {
+                            if let Ok(new_url) = Url::parse(loc) {
+                                override_url = Some(new_url);
+                                continue;
+                            }
+                        } else if let Some(ref reg) = new_region {
+                            let mut redirected = url.clone();
+                            let _ = redirected.set_host(Some(&format!("s3.{reg}.amazonaws.com")));
+                            override_url = Some(redirected);
+                            continue;
+                        }
                     }
 
                     let resp_bytes = resp
@@ -942,4 +1011,85 @@ fn build_put_headers(opts: &PutObjectOptions) -> HeaderMap {
         }
     }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{AwsCredentials, ResolvedConfig};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[tokio::test]
+    async fn test_put_and_post_always_include_content_length_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            for expected_len in ["0", "0", "0", "5"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req_str = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                assert!(
+                    req_str.contains(&format!("content-length: {expected_len}\r\n")),
+                    "Missing expected Content-Length: {expected_len} in raw HTTP request:\n{req_str}"
+                );
+                let xml = "<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nETag: \"etag1\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    xml.len(),
+                    xml
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let cfg = ResolvedConfig {
+            credentials: Some(AwsCredentials {
+                access_key_id: "test".to_string(),
+                secret_access_key: "test".to_string(),
+                session_token: None,
+            }),
+            region: "us-east-1".to_string(),
+            endpoints: vec![format!("http://{addr}")],
+            no_sign_request: false,
+            no_verify_ssl: false,
+            use_list_objects_v1: false,
+            request_payer: None,
+            retry_count: 0,
+            unsigned_payload: true,
+        };
+        let client = S3Client::new(cfg, None).unwrap();
+
+        // 1. create_bucket (PUT with empty body)
+        client.create_bucket("my-bucket").await.unwrap();
+        // 2. create_multipart_upload (POST with empty body)
+        client
+            .create_multipart_upload("my-bucket", "large.bin", &PutObjectOptions::default())
+            .await
+            .unwrap();
+        // 3. put_object with 0-byte empty file (PUT with empty body)
+        client
+            .put_object(
+                "my-bucket",
+                "empty.txt",
+                Bytes::new(),
+                &PutObjectOptions::default(),
+            )
+            .await
+            .unwrap();
+        // 4. put_object with 5-byte file (PUT with 5-byte body)
+        client
+            .put_object(
+                "my-bucket",
+                "hello.txt",
+                Bytes::from_static(b"hello"),
+                &PutObjectOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        server.join().unwrap();
+    }
 }
