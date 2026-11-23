@@ -746,20 +746,26 @@ tar xzf "${TARGET}.tar.gz" &amp;&amp; sudo mv t3 /usr/local/bin/t3</pre>
       <div id="tab-transfer" class="tab-panel">
         <div class="code-window">
           <div class="code-topbar">
-            <span>bash — Drop-in s5cmd syntax with --stat and --json telemetry</span>
+            <span>bash — Drop-in s5cmd syntax + v0.2.0 tar-sync, exists, CAS writes &amp; --json-stats</span>
             <button class="copy-btn" onclick="copyCode('code-transfer', this)">Copy</button>
           </div>
-          <pre id="code-transfer"># Upload directory of shards to S3 (or RustStack at http://localhost:4566)
-t3 --stat cp ./training-shards/ s3://ml-bucket/v1/shards/
+          <pre id="code-transfer"># 1. Single-object compressed tar-stream save &amp; restore (auto-detects lz4 / zstd / gzip / raw tar)
+t3 --json-stats tar-sync \
+  --metadata gh-repo=owner/repo --metadata generation=7 \
+  ./buildx-cache/ s3://ci-cache-bucket/caches/gen-7.tar.lz4
+t3 --json-stats tar-sync s3://ci-cache-bucket/caches/gen-7.tar.lz4 ./restored-cache/
 
-# Download matching Parquet files with --exclude filter
-t3 --stat cp --exclude "*.tmp" "s3://ml-bucket/v1/shards/*.parquet" ./local-shards/
+# 2. Fast HEAD existence probe (exit 0 = exists, exit 3 = not found / cache miss)
+t3 exists s3://ci-cache-bucket/pointers/_pointer
 
-# Incremental sync with stale object deletion
-t3 --stat sync --delete ./local-shards/ s3://ml-bucket/v1/shards/
+# 3. Compare-And-Swap (CAS) atomic pointer updates (exit 4 on 412 PreconditionFailed)
+t3 cp --if-none-match "*" ./_pointer s3://ci-cache-bucket/pointers/_pointer
+t3 cp --if-match '"d41d8cd98f00b204e9800998ecf8427e"' ./_pointer s3://ci-cache-bucket/pointers/_pointer
 
-# "Beast Mode": Execute thousands of heterogeneous S3 operations in one shared worker pool
-t3 --stat run batch-commands.txt</pre>
+# 4. Resumable multipart range download (.t3part) &amp; age-scoped pruning
+t3 cp --continue s3://ml-bucket/layers/large-2gb.tar.zst ./large-2gb.tar.zst
+t3 rm --older-than 24h "s3://ci-cache-bucket/staging/*"
+t3 sync --delete --exclude-newer-than 2h ./local-shards/ s3://ml-bucket/v1/shards/</pre>
         </div>
       </div>
 
@@ -843,11 +849,13 @@ t3 cp "s3://production-bucket/checkpoints/*" /mnt/nvme/checkpoints/</pre>
       </div>
 
       <div class="services-grid">
-        <div class="service-card"><div class="service-card-top"><span class="service-name">cp</span><span class="service-crate">Transfer</span></div><div class="service-ops">Parallel upload, streaming/range download, and S3-to-S3 multipart copy (&gt; 5 GiB).</div></div>
-        <div class="service-card"><div class="service-card-top"><span class="service-name">sync</span><span class="service-crate">Diff Engine</span></div><div class="service-ops">Concurrent source &amp; destination listing diff with <code>--delete</code>, <code>--size-only</code>, <code>--exact-timestamps</code>.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">cp</span><span class="service-crate">Transfer</span></div><div class="service-ops">Adaptive single/multipart upload, <code>--continue</code> resumable range download, <code>--tar-stream</code>, and CAS (<code>--if-match</code> / <code>--if-none-match</code>).</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">tar-sync</span><span class="service-crate">v0.2.0 Archive</span></div><div class="service-ops">Packs/unpacks a directory tree as a single S3 tar archive (<code>lz4</code> 1.3 GiB/s, <code>zstd</code>, <code>gzip</code>, or raw <code>.tar</code>).</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">exists</span><span class="service-crate">v0.2.0 Probe</span></div><div class="service-ops">Fast <code>HEAD</code> existence check returning exit code <code>0</code> if found and exit code <code>3</code> on <code>404 NotFound</code>.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">sync</span><span class="service-crate">Diff Engine</span></div><div class="service-ops">Concurrent source &amp; destination listing diff with <code>--delete</code>, <code>--exclude-newer-than</code>, <code>--size-only</code>.</div></div>
         <div class="service-card"><div class="service-card-top"><span class="service-name">mv</span><span class="service-crate">Transfer</span></div><div class="service-ops">High-speed parallel copy followed by atomic source deletion.</div></div>
         <div class="service-card"><div class="service-card-top"><span class="service-name">ls</span><span class="service-crate">Listing</span></div><div class="service-ops">Bucket &amp; prefix listing with speculative <code>Delimiter=/</code> fan-out, <code>-e</code>, <code>-H</code>, <code>-s</code>.</div></div>
-        <div class="service-card"><div class="service-card-top"><span class="service-name">rm</span><span class="service-crate">Batch Delete</span></div><div class="service-ops">Pipelined 1,000-key <code>DeleteObjects</code> batcher across wildcards and versions.</div></div>
+        <div class="service-card"><div class="service-card-top"><span class="service-name">rm</span><span class="service-crate">Batch Delete</span></div><div class="service-ops">Pipelined 1,000-key <code>DeleteObjects</code> batcher with <code>--older-than &lt;duration&gt;</code> age pruning.</div></div>
         <div class="service-card"><div class="service-card-top"><span class="service-name">run</span><span class="service-crate">Beast Mode</span></div><div class="service-ops">Executes batch commands from file or <code>stdin</code> concurrently on the shared worker pool.</div></div>
         <div class="service-card"><div class="service-card-top"><span class="service-name">cat</span><span class="service-crate">Streaming</span></div><div class="service-ops">Streams one or more S3 objects (including wildcards) directly to <code>stdout</code>.</div></div>
         <div class="service-card"><div class="service-card-top"><span class="service-name">pipe</span><span class="service-crate">Streaming</span></div><div class="service-ops">Streams <code>stdin</code> directly to an S3 object via bounded-memory parallel multipart upload.</div></div>

@@ -5,7 +5,7 @@
 #   curl -sSfL https://raw.githubusercontent.com/ehlerst/t3/main/install.sh | sh
 #
 # Environment Variables:
-#   T3_VERSION      Release tag to install (default: "latest", e.g. "v0.1.2")
+#   T3_VERSION      Release tag to install (default: "latest", e.g. "v0.2.0")
 #   T3_INSTALL_DIR  Destination directory (default: /usr/local/bin or ~/.local/bin)
 
 set -eu
