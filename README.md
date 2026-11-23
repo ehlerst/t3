@@ -1,5 +1,11 @@
 # ⚡ t3 (Turbo 3)
 
+<p align="center">
+  <img src="docs/turbo-meme.jpg" alt="t3 (Turbo 3) — The PC Turbo Button Permanently Jammed ON (3.5 GiB/s)" width="840" />
+  <br />
+  <em>Remember the physical <b>TURBO</b> button on beige PC towers that nobody in the history of computing ever turned off? That's <code>t3</code> for S3 — super-glued in the <b>ON</b> position at <b>3.5 GiB/s</b>.</em>
+</p>
+
 > **Blazing-fast parallel S3 client & 100% drop-in `s5cmd` replacement in Rust: ~1.5 ms cold start, ~4.5 MiB idle memory footprint, pre-allocated `pwrite`/`pread` zero-lock NVMe I/O, and sister project to [RustStack](https://github.com/ehlerst/ruststack).**
 
 [![CI](https://github.com/ehlerst/t3/actions/workflows/ci.yml/badge.svg)](https://github.com/ehlerst/t3/actions/workflows/ci.yml)
